@@ -39,7 +39,7 @@ async def on_startup():
 async def on_shutdown():
     await bot.stop()
 
-@app.get("/")
+@app.head("/")
 def home():
     return {"status": "online", "message": "SSAnime Telegram Engine is Running!"}
 
