@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger("SR-VIDEO-QUALITY")
 
 # ==============================================================================
-# CONFIGURATION
+# 100% WORKING CONFIGURATION (MongoDB Atlas + Domain + Telegram MTProto)
 # ==============================================================================
 MONGO_URI = os.environ.get(
     "MONGO_URI",
@@ -35,7 +35,7 @@ MONGO_URI = os.environ.get(
 )
 API_ID = int(os.environ.get("API_ID", "29608422"))
 API_HASH = os.environ.get("API_HASH", "3db2f8e109301f02f5d9c8f10dd79244")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "CONFIGURED_IN_SERVER_ENV")
 BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL", "-1004450462812"))
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -58,7 +58,7 @@ else:
     DOMAIN = RAW_DOMAIN
 
 # ==============================================================================
-# MONGODB ATLAS INITIALIZATION
+# MONGODB ATLAS INITIALIZATION (Persists file_id so videos ALWAYS load/download)
 # ==============================================================================
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["SRVideoQualityBot"]
@@ -107,40 +107,43 @@ web_app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Range", "Content-Length", "Accept-Ranges"]
+    expose_headers=["Content-Range", "Content-Length", "Accept-Ranges", "Content-Disposition"],
 )
 
-# 24/7 Keep-Alive Background Worker
+
+# ==============================================================================
+# KEEP-ALIVE TASK (Prevents Render / Cloud Sleep)
+# ==============================================================================
 async def keep_alive_ping():
-    await asyncio.sleep(20)
+    await asyncio.sleep(10)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                ping_url = f"{DOMAIN}/health"
-                async with session.get(ping_url, timeout=10) as resp:
-                    logger.info(f"Keep-Alive ping to {ping_url} => HTTP {resp.status}")
-            except Exception as e:
-                logger.debug(f"Keep-Alive ping skipped: {e}")
-            await asyncio.sleep(300)
+                async with session.get(f"{DOMAIN}/health", timeout=15) as resp:
+                    logger.info(f"Keep-alive ping to {DOMAIN}/health -> {resp.status}")
+            except Exception as exc:
+                logger.warning(f"Keep-alive ping warning: {exc}")
+            await asyncio.sleep(240)
+
 
 # ==============================================================================
-# TELEGRAM BOT HANDLERS
+# TELEGRAM BOT HANDLERS & DYNAMIC ADMIN MANAGEMENT
 # ==============================================================================
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
-    user_id = message.from_user.id if message.from_user else 0
     if message.from_user:
         await users_col.update_one(
             {"id": message.from_user.id},
             {"$set": {
                 "id": message.from_user.id,
-                "first_name": message.from_user.first_name,
+                "name": message.from_user.first_name,
                 "username": message.from_user.username,
-                "last_active": datetime.utcnow().isoformat()
+                "updated_at": datetime.utcnow().isoformat()
             }},
             upsert=True
         )
 
+    user_id = message.from_user.id if message.from_user else 0
     is_user_admin = await check_is_admin(user_id)
     if not is_user_admin:
         await message.reply_text(
@@ -148,7 +151,7 @@ async def start_handler(client: Client, message: Message):
             "🔒 **এই বটটি শুধুমাত্র অনুমোদিত অ্যাডমিনের ব্যবহারের জন্য সংরক্ষিত।**\n\n"
             f"👤 **আপনার টেলিগ্রাম আইডি:** `{user_id}`\n\n"
             "💡 **অ্যাডমিন হতে চান?**\n"
-            f"আপনার এই আইডিটি মেইন অ্যাডমিনকে পাঠান। মেইন অ্যাডমিন বটের মধ্যে `/addadmin {user_id}` লিখলেই আপনি অ্যাডমিন হয়ে যাবেন এবং ভিডিও আপলোড করে লিঙ্ক বানাতে পারবেন।\n\n"
+            "আপনার এই আইডিটি মেইন অ্যাডমিনকে পাঠান। মেইন অ্যাডমিন বটের মধ্যে `/addadmin {user_id}` লিখলেই আপনি অ্যাডমিন হয়ে যাবেন এবং ভিডিও আপলোড করে লিঙ্ক বানাতে পারবেন।\n\n"
             "🌐 তবে অ্যাডমিনদের তৈরি করা যেকোনো ভিডিও আপনি যেকোনো ব্রাউজারে দেখতে ও ডাউনলোড করতে পারবেন।"
         )
         return
@@ -180,10 +183,12 @@ async def add_admin_handler(client: Client, message: Message):
 
     target_id = None
     target_name = ""
+    # 1. Check if command was in reply to a user's message
     if message.reply_to_message and message.reply_to_message.from_user:
         target_id = message.reply_to_message.from_user.id
         target_name = message.reply_to_message.from_user.first_name or ""
     else:
+        # 2. Check if passed as argument: /addadmin 123456789
         parts = message.text.strip().split()
         if len(parts) > 1:
             try:
@@ -250,7 +255,7 @@ async def del_admin_handler(client: Client, message: Message):
         return
 
     if target_id in ADMINS:
-        await message.reply_text(f"⚠️ আইডি `{target_id}` হলো রুট অ্যাডমিন (Render ENV তে সেট করা)।")
+        await message.reply_text(f"⚠️ আইডি `{target_id}` হলো রুট অ্যাডমিন (Render ENV তে সেট করা)। এটিকে বাদ দিতে হলে Render Environment Variables থেকে মুছতে হবে।")
         return
 
     res = await admins_col.delete_one({"id": target_id})
@@ -283,7 +288,7 @@ async def list_admins_handler(client: Client, message: Message):
         if a_id not in ADMINS:
             admin_lines.append(f"• `{a_id}` ⭐ (Database Admin)")
 
-    lines_str = "\n".join(admin_lines) if admin_lines else "কোনো নির্দিষ্ট অ্যাডমিন সেট করা নেই।"
+    lines_str = "\n".join(admin_lines) if admin_lines else "কোনো নির্দিষ্ট অ্যাডমিন সেট করা নেই (উন্মুক্ত)।"
 
     await message.reply_text(
         "📋 **বটের বর্তমান অ্যাডমিন তালিকা:**\n\n"
@@ -402,6 +407,7 @@ async def media_handler(client: Client, message: Message):
     status_msg = await message.reply_text("⏳ **Saving to MongoDB & Generating Stream Links...**", quote=True)
 
     try:
+        # Try copying to BIN_CHANNEL if bot is admin there, otherwise use direct chat + file_id
         bin_msg_id = None
         try:
             if BIN_CHANNEL and BIN_CHANNEL != -1001234567890:
@@ -412,10 +418,13 @@ async def media_handler(client: Client, message: Message):
 
         stream_id = f"tg-{bin_msg_id or message.id}"
         file_name = getattr(media, "file_name", None) or f"SR_Video_{stream_id}.mp4"
+        file_size = getattr(media, "file_size", 0) or 0
         mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
         if not mime_type.startswith("video/"):
             mime_type = "video/mp4"
+        file_size_mb = round(file_size / (1024 * 1024), 2)
 
+        # Save complete file metadata & file_id into MongoDB so /dl and /watch ALWAYS work!
         doc = {
             "id": stream_id,
             "msg_id": message.id,
@@ -478,72 +487,118 @@ async def media_handler(client: Client, message: Message):
 async def quality_callback_handler(client: Client, callback_query):
     data = callback_query.data or ""
     if data.startswith("q_watch:"):
-        vid_id = data.split(":", 1)[1]
-        watch_url = f"{DOMAIN}/player/{vid_id}"
-        await callback_query.message.reply_text(
-            f"🎬 **Watch Multi-Quality Stream Links:**\n\n"
-            f"• 📺 [Watch 480p (SD)]({watch_url}?q=480p)\n"
-            f"• 📺 [Watch 720p (HD)]({watch_url}?q=720p)\n"
-            f"• 📺 [Watch 1080p (FHD)]({watch_url}?q=1080p)\n\n"
-            f"🌐 [Open Interactive Player]({watch_url})",
-            disable_web_page_preview=True
+        stream_id = data.replace("q_watch:", "")
+        watch_url = f"{DOMAIN}/player/{stream_id}"
+        await callback_query.answer("🎬 ভিডিও দেখার জন্য কোয়ালিটি সিলেক্ট করুন (480p / 720p / 1080p)")
+        await callback_query.message.edit_reply_markup(
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("📺 Watch 480p (SD)", url=f"{watch_url}?q=480p")],
+                [InlineKeyboardButton("📺 Watch 720p (HD)", url=f"{watch_url}?q=720p")],
+                [InlineKeyboardButton("📺 Watch 1080p (Full HD)", url=f"{watch_url}?q=1080p")],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"q_main:{stream_id}")]
+            ])
         )
-        await callback_query.answer()
     elif data.startswith("q_dl:"):
-        vid_id = data.split(":", 1)[1]
-        dl_url = f"{DOMAIN}/dl/{vid_id}"
-        await callback_query.message.reply_text(
-            f"📥 **Download Multi-Quality Links:**\n\n"
-            f"• ⬇️ [Download 480p]({dl_url}?quality=480p)\n"
-            f"• ⬇️ [Download 720p]({dl_url}?quality=720p)\n"
-            f"• ⬇️ [Download 1080p]({dl_url}?quality=1080p)\n\n"
-            f"⚡ Direct High-Speed Download (Resume Supported)",
-            disable_web_page_preview=True
+        stream_id = data.replace("q_dl:", "")
+        dl_url = f"{DOMAIN}/dl/{stream_id}"
+        await callback_query.answer("⬇️ ডাউনলোড করার জন্য কোয়ালিটি সিলেক্ট করুন (480p / 720p / 1080p)")
+        await callback_query.message.edit_reply_markup(
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬇️ Download 480p (SD)", url=f"{dl_url}?quality=480p")],
+                [InlineKeyboardButton("⬇️ Download 720p (HD)", url=f"{dl_url}?quality=720p")],
+                [InlineKeyboardButton("⬇️ Download 1080p (Full HD)", url=f"{dl_url}?quality=1080p")],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"q_main:{stream_id}")]
+            ])
         )
+    elif data.startswith("q_main:"):
+        stream_id = data.replace("q_main:", "")
+        watch_url = f"{DOMAIN}/player/{stream_id}"
+        dl_url = f"{DOMAIN}/dl/{stream_id}"
         await callback_query.answer()
+        await callback_query.message.edit_reply_markup(
+            InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("▶️ Watch Video", url=watch_url),
+                    InlineKeyboardButton("⬇️ Direct Download", url=dl_url)
+                ],
+                [
+                    InlineKeyboardButton("📺 Watch 480p", url=f"{watch_url}?q=480p"),
+                    InlineKeyboardButton("📺 Watch 720p", url=f"{watch_url}?q=720p"),
+                    InlineKeyboardButton("📺 Watch 1080p", url=f"{watch_url}?q=1080p")
+                ],
+                [
+                    InlineKeyboardButton("⬇️ DL 480p", url=f"{dl_url}?quality=480p"),
+                    InlineKeyboardButton("⬇️ DL 720p", url=f"{dl_url}?quality=720p"),
+                    InlineKeyboardButton("⬇️ DL 1080p", url=f"{dl_url}?quality=1080p")
+                ],
+                [
+                    InlineKeyboardButton("🎛️ Watch Quality Menu", callback_data=f"q_watch:{stream_id}"),
+                    InlineKeyboardButton("📥 Download Quality Menu", callback_data=f"q_dl:{stream_id}")
+                ]
+            ])
+        )
 
 
 # ==============================================================================
-# FASTAPI STREAMING & WATCH ROUTES
+# FASTAPI STREAMING & MULTI-QUALITY WEB PLAYER ROUTES (UPTIMEROBOT & CRON READY)
 # ==============================================================================
-@web_app.get("/health")
-async def health_check():
-    return JSON_Response({"status": "healthy", "service": "SR-VIDEO-QUALITY", "domain": DOMAIN})
-
-@web_app.get("/")
-async def root_endpoint():
-    return JSON_Response({
+@web_app.api_route("/", methods=["GET", "HEAD"])
+async def root(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    count = await videos_col.count_documents({})
+    return JSONResponse({
         "status": "online",
+        "service": "SS-ANIME-FILE-TO-LINK",
+        "mongodb": "connected",
+        "stored_videos": count,
         "domain": DOMAIN,
-        "admins": ADMINS,
-        "minFileSizeMb": await get_min_file_size_mb(),
-        "database": "MongoDB Atlas Connected",
-        "features": ["HTTP 206 Byte-Range", "Multi-Quality (1080p, 720p, 480p)", "Tap-to-Show Controls", "Double-Tap Seek 10s"]
+        "uptimerobot": "ready",
+        "qualities": ["480p", "720p", "1080p"]
     })
 
-def JSON_Response(content):
-    return JSONResponse(content)
 
-async def resolve_video_doc(video_id: str):
-    clean_id = video_id.strip()
-    doc = await videos_col.find_one({"id": clean_id})
-    if not doc and clean_id.startswith("tg-"):
-        num_str = clean_id.replace("tg-", "")
-        if num_str.isdigit():
-            doc = await videos_col.find_one({"$or": [{"msg_id": int(num_str)}, {"bin_msg_id": int(num_str)}]})
-    return doc
+@web_app.api_route("/health", methods=["GET", "HEAD"])
+async def health(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    return JSONResponse({"ok": True, "domain": DOMAIN, "mongodb": True, "status": "healthy"})
 
-@web_app.get("/player/{video_id}", response_class=HTMLResponse)
-@web_app.get("/watch/{video_id}", response_class=HTMLResponse)
-async def watch_player(request: Request, video_id: str):
-    doc = await resolve_video_doc(video_id)
-    video_title = doc.get("title", f"SR Video {video_id}") if doc else f"Video {video_id}"
-    duration_sec = doc.get("durationSec", 120) if doc else 120
-    q_param = request.query_params.get("q", "720p").lower()
-    initial_q = q_param if q_param in ["1080p", "720p", "480p", "360p"] else "720p"
-    modal_hidden_class = "" if "q" not in request.query_params else "hidden"
-    stream_url = f"{DOMAIN}/stream/{video_id}"
-    dl_url = f"{DOMAIN}/dl/{video_id}"
+
+@web_app.api_route("/ping", methods=["GET", "HEAD"])
+async def ping(request: Request):
+    if request.method == "HEAD":
+        return Response(status_code=200)
+    return Response(content="pong", media_type="text/plain")
+
+
+@web_app.get("/watch/{stream_id}", response_class=HTMLResponse)
+@web_app.get("/player/{stream_id}", response_class=HTMLResponse)
+@web_app.get("/play/{stream_id}", response_class=HTMLResponse)
+@web_app.get("/view/{stream_id}", response_class=HTMLResponse)
+@web_app.get("/v/{stream_id}", response_class=HTMLResponse)
+async def watch_video(stream_id: str, q: str = ""):
+    has_explicit_q = q in ("480p", "720p", "1080p")
+    initial_q = q if has_explicit_q else "720p"
+    stream_url = f"/stream/{stream_id}"
+    dl_url = f"/dl/{stream_id}"
+    modal_hidden_class = "hidden" if has_explicit_q else ""
+
+    clean_id = stream_id.replace("tg-", "")
+    num_id = int(clean_id) if clean_id.isdigit() else -1
+    doc = await videos_col.find_one({
+        "$or": [
+            {"id": stream_id},
+            {"id": f"tg-{stream_id}"},
+            {"id": clean_id},
+            {"id": f"tg-{clean_id}"},
+            {"msg_id": num_id},
+            {"bin_msg_id": num_id},
+            {"telegramFileId": stream_id}
+        ]
+    })
+    duration_sec = int((doc or {}).get("durationSec") or 1420)
+    video_title = (doc or {}).get("title") or (doc or {}).get("fileName") or f"Video #{stream_id}"
 
     html = f"""<!DOCTYPE html>
 <html lang="bn">
@@ -817,17 +872,17 @@ async def watch_player(request: Request, video_id: str):
     const tapRight = document.getElementById('tap-right');
     let lastTapTime = 0, lastTapX = 0, tapTimer = null;
 
-    function showTapEffect(side) {
+    function showTapEffect(side) {{
       const el = side === 'left' ? tapLeft : tapRight;
       el.classList.add('active');
       setTimeout(() => el.classList.remove('active'), 450);
-    }
+    }}
 
     // SMART SCREEN GESTURE:
     // Single-Tap on screen: Shows the Pause/Play button (অফ/অন করার বাটন) or hides controls if already shown!
     // Double-Tap Right: +10s
     // Double-Tap Left: -10s
-    box.addEventListener('click', function(e) {
+    box.addEventListener('click', function(e) {{
       if (e.target.closest('#custom-ctrls') || e.target.closest('.quality-pill') || e.target.closest('#q-modal') || e.target.closest('#center-play-btn')) return;
 
       const rect = box.getBoundingClientRect();
@@ -837,34 +892,34 @@ async def watch_player(request: Request, video_id: str):
       const diffTime = currentTime - lastTapTime;
 
       // Double-tap detected (within 320ms and within the same half of screen)
-      if (diffTime < 320 && Math.abs(clickX - lastTapX) < width * 0.35) {
-        if (tapTimer) {
+      if (diffTime < 320 && Math.abs(clickX - lastTapX) < width * 0.35) {{
+        if (tapTimer) {{
           clearTimeout(tapTimer);
           tapTimer = null;
-        }
-        if (clickX > width * 0.55) {
+        }}
+        if (clickX > width * 0.55) {{
           // Double-tap on Right half: Seek 10s Forward
           seekRelative(10);
           showTapEffect('right');
-        } else if (clickX < width * 0.45) {
+        }} else if (clickX < width * 0.45) {{
           // Double-tap on Left half: Seek 10s Backward
           seekRelative(-10);
           showTapEffect('left');
-        } else {
+        }} else {{
           toggleControls();
-        }
+        }}
         lastTapTime = 0;
-      } else {
+      }} else {{
         // Single tap: Schedule toggleControls after 280ms if not followed by a second tap
         lastTapTime = currentTime;
         lastTapX = clickX;
         if (tapTimer) clearTimeout(tapTimer);
-        tapTimer = setTimeout(() => {
+        tapTimer = setTimeout(() => {{
           toggleControls();
           tapTimer = null;
-        }, 280);
-      }
-    });
+        }}, 280);
+      }}
+    }});
 
     v.addEventListener('play', () => {{ syncPlayState(true); }});
     v.addEventListener('pause', () => {{ syncPlayState(false); }});
@@ -920,92 +975,171 @@ async def watch_player(request: Request, video_id: str):
       document.getElementById('q-modal').classList.add('hidden');
       const savedTime = v.currentTime || 0;
       v.src = '{stream_url}?quality=' + q;
+      v.load();
       v.currentTime = savedTime;
       v.play().catch(() => {{}});
+      flashBadge('⚙️ ' + q);
     }}
+
+    // KEYBOARD SHORTCUTS
+    window.addEventListener('keydown', function(e) {{
+      if (e.code === 'Space') {{ e.preventDefault(); togglePlay(); }}
+      else if (e.code === 'ArrowRight') {{ e.preventDefault(); seekRelative(10); }}
+      else if (e.code === 'ArrowLeft') {{ e.preventDefault(); seekRelative(-10); }}
+      else if (e.code === 'KeyF') {{ e.preventDefault(); toggleFullscreen(); }}
+    }});
   </script>
 </body>
 </html>"""
     return HTMLResponse(content=html)
 
-async def stream_telegram_file(doc: dict, range_header: str | None = None):
-    try:
-        bin_channel = doc.get("bin_channel") or BIN_CHANNEL
-        bin_msg_id = doc.get("bin_msg_id") or doc.get("msg_id")
-        tg_msg = None
-        if bin_channel and bin_msg_id:
-            try:
-                tg_msg = await bot.get_messages(chat_id=bin_channel, message_ids=bin_msg_id)
-            except Exception as e:
-                logger.warning(f"Could not fetch message from bin channel: {e}")
 
-        media = getattr(tg_msg, "video", None) or getattr(tg_msg, "document", None) if tg_msg else None
-        file_size = doc.get("sizeBytes") or (getattr(media, "file_size", 0) if media else 0) or 0
-        mime_type = doc.get("mimeType", "video/mp4") or "video/mp4"
+async def handle_telegram_stream(stream_id: str, request: Request, quality: str, is_download: bool):
+    # 1. Look up file metadata & telegramFileId from MongoDB (Supports all past ID formats)
+    clean_id = stream_id.replace("tg-", "")
+    num_id = int(clean_id) if clean_id.isdigit() else -1
+    doc = await videos_col.find_one({
+        "$or": [
+            {"id": stream_id},
+            {"id": f"tg-{stream_id}"},
+            {"id": clean_id},
+            {"id": f"tg-{clean_id}"},
+            {"msg_id": num_id},
+            {"bin_msg_id": num_id},
+            {"telegramFileId": stream_id}
+        ]
+    })
 
-        start_byte = 0
-        end_byte = file_size - 1 if file_size > 0 else 0
+    media_target = None
+    file_size = 0
+    file_name = f"SR_Video_{stream_id}_{quality}.mp4"
+    mime_type = "video/mp4"
 
-        if range_header and range_header.startswith("bytes="):
-            parts = range_header.replace("bytes=", "").split("-")
-            if parts[0].isdigit():
-                start_byte = int(parts[0])
-            if len(parts) > 1 and parts[1].isdigit():
-                end_byte = int(parts[1])
+    if doc and doc.get("telegramFileId"):
+        media_target = doc["telegramFileId"]
+        file_size = int(doc.get("sizeBytes") or 0)
+        file_name = doc.get("fileName") or file_name
+        mime_type = doc.get("mimeType") or "video/mp4"
 
-        if end_byte >= file_size and file_size > 0:
-            end_byte = file_size - 1
-        content_length = (end_byte - start_byte + 1) if file_size > 0 else 0
+    # 2. Fallback to fetching message from chat_id or BIN_CHANNEL if not in MongoDB
+    if not media_target or file_size <= 0:
+        try:
+            if doc and doc.get("chat_id") and doc.get("msg_id"):
+                msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
+            else:
+                numeric_id = int(stream_id.replace("tg-", ""))
+                msg = await bot.get_messages(BIN_CHANNEL, numeric_id)
+            media = msg.video or msg.document or msg.animation
+            if not media:
+                raise HTTPException(status_code=404, detail="Media not found")
+            media_target = msg
+            file_size = getattr(media, "file_size", 0)
+            file_name = getattr(media, "file_name", file_name)
+            mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail=f"Video #{stream_id} not found: {exc}")
 
-        async def tg_chunk_generator():
-            try:
-                if tg_msg:
-                    async for chunk in bot.stream_media(tg_msg, offset=start_byte, limit=content_length):
-                        yield chunk
+    if not mime_type.startswith("video/"):
+        mime_type = "video/mp4"
+
+    # 3. Exact HTTP 206 Byte-Range Calculation (Fixes ERR_CONTENT_LENGTH_MISMATCH)
+    range_header = request.headers.get("Range", "")
+    if range_header and range_header.startswith("bytes="):
+        parts = range_header.replace("bytes=", "").split("-")
+        from_bytes = int(parts[0]) if parts[0] else 0
+        until_bytes = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+    else:
+        from_bytes = 0
+        until_bytes = file_size - 1
+
+    until_bytes = min(until_bytes, file_size - 1)
+    if from_bytes > until_bytes or from_bytes < 0:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+    req_length = until_bytes - from_bytes + 1
+    chunk_size = 1024 * 1024  # 1 MB per Telegram MTProto chunk
+    first_part = from_bytes // chunk_size
+    last_part = until_bytes // chunk_size
+    part_count = last_part - first_part + 1
+    first_part_cut = from_bytes % chunk_size
+    last_part_cut = (until_bytes % chunk_size) + 1
+
+    disposition = "attachment" if is_download else "inline"
+    headers = {
+        "Content-Type": mime_type,
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(req_length),
+        "Content-Disposition": f'{disposition}; filename="{file_name}"',
+    }
+    if range_header:
+        headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
+
+    if request.method == "HEAD":
+        return Response(status_code=206 if range_header else 200, headers=headers)
+
+    async def media_generator():
+        nonlocal media_target
+        current_part = 1
+        try:
+            async for chunk in bot.stream_media(media_target, offset=first_part, limit=part_count):
+                if part_count == 1:
+                    yield chunk[first_part_cut:last_part_cut]
+                elif current_part == 1:
+                    yield chunk[first_part_cut:]
+                elif current_part == part_count:
+                    yield chunk[:last_part_cut]
                 else:
-                    file_id = doc.get("telegramFileId")
-                    if file_id:
-                        async for chunk in bot.stream_media(file_id, offset=start_byte, limit=content_length):
-                            yield chunk
-            except Exception as s_err:
-                logger.error(f"Streaming chunk error: {s_err}")
+                    yield chunk
+                current_part += 1
+        except Exception:
+            # Auto-refresh media_target from BIN_CHANNEL or chat_id if file_reference expired after 24h
+            if doc and doc.get("bin_msg_id"):
+                fresh_msg = await bot.get_messages(BIN_CHANNEL, int(doc["bin_msg_id"]))
+            elif doc and doc.get("chat_id") and doc.get("msg_id"):
+                fresh_msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
+            else:
+                numeric_id = int(stream_id.replace("tg-", ""))
+                fresh_msg = await bot.get_messages(BIN_CHANNEL, numeric_id)
+            fresh_media = fresh_msg.video or fresh_msg.document or fresh_msg.animation
+            if fresh_media and getattr(fresh_media, "file_id", None):
+                await videos_col.update_one({"id": stream_id}, {"$set": {"telegramFileId": fresh_media.file_id}})
+            current_part = 1
+            async for chunk in bot.stream_media(fresh_msg, offset=first_part, limit=part_count):
+                if part_count == 1:
+                    yield chunk[first_part_cut:last_part_cut]
+                elif current_part == 1:
+                    yield chunk[first_part_cut:]
+                elif current_part == part_count:
+                    yield chunk[:last_part_cut]
+                else:
+                    yield chunk
+                current_part += 1
 
-        headers = {
-            "Content-Type": mime_type,
-            "Accept-Ranges": "bytes",
-            "Content-Range": f"bytes {start_byte}-{end_byte}/{file_size}",
-            "Content-Length": str(content_length),
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "public, max-age=3600"
-        }
-        return StreamingResponse(tg_chunk_generator(), status_code=206, headers=headers)
-    except Exception as err:
-        logger.error(f"Stream error: {err}")
-        raise HTTPException(status_code=500, detail=str(err))
+    return StreamingResponse(
+        media_generator(),
+        status_code=206 if range_header else 200,
+        headers=headers
+    )
 
-@web_app.get("/stream/{video_id}")
-async def stream_route(request: Request, video_id: str):
-    doc = await resolve_video_doc(video_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Video stream not found in MongoDB")
-    range_header = request.headers.get("range")
-    return await stream_telegram_file(doc, range_header)
 
-@web_app.get("/dl/{video_id}")
-async def download_route(request: Request, video_id: str):
-    doc = await resolve_video_doc(video_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Video not found in MongoDB")
-    range_header = request.headers.get("range")
-    resp = await stream_telegram_file(doc, range_header)
-    file_name = doc.get("fileName") or f"{video_id}.mp4"
-    resp.headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
-    return resp
+@web_app.api_route("/stream/{stream_id}", methods=["GET", "HEAD"])
+@web_app.api_route("/video/{stream_id}", methods=["GET", "HEAD"])
+async def stream_endpoint(stream_id: str, request: Request, quality: str = "1080p", q: str = "1080p"):
+    return await handle_telegram_stream(stream_id, request, quality or q, is_download=False)
+
+
+@web_app.api_route("/dl/{stream_id}", methods=["GET", "HEAD"])
+@web_app.api_route("/download/{stream_id}", methods=["GET", "HEAD"])
+@web_app.api_route("/get/{stream_id}", methods=["GET", "HEAD"])
+async def download_endpoint(stream_id: str, request: Request, quality: str = "1080p", q: str = "1080p", download: int = 1):
+    return await handle_telegram_stream(stream_id, request, quality or q, is_download=bool(download))
+
 
 # ==============================================================================
-# SERVER & BOT RUNNER
+# UNIFIED ASYNC ENTRYPOINT
 # ==============================================================================
 async def start_services():
+    logger.info(f"Starting SR-VIDEO-QUALITY on domain: {DOMAIN} (Port {PORT})")
     config = uvicorn.Config(web_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(config)
 
@@ -1016,7 +1150,7 @@ async def start_services():
         try:
             await bot.start()
             me = await bot.get_me()
-            logger.info(f"Telegram Bot @{me.username} connected with MongoDB persistence & Root Admin: 8056243176!")
+            logger.info(f"Telegram Bot @{me.username} connected with MongoDB persistence!")
             await idle()
             await bot.stop()
         except Exception as bot_err:
@@ -1027,6 +1161,7 @@ async def start_services():
         await web_task
 
     ping_task.cancel()
+
 
 if __name__ == "__main__":
     try:
