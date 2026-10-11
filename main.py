@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse, Res
 from fastapi.middleware.cors import CORSMiddleware
 from hydrogram import Client, filters, idle
 from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from hydrogram.errors import FloodWait, MessageNotModified
 
 logging.basicConfig(
     level=logging.INFO,
@@ -404,15 +405,15 @@ async def media_handler(client: Client, message: Message):
     except Exception:
         return
 
-    status_msg = await message.reply_text("⏳ **Saving to MongoDB & Generating Stream Links...**", quote=True)
-
-    try:
         # Try copying to BIN_CHANNEL if bot is admin there, otherwise use direct chat + file_id
         bin_msg_id = None
         try:
             if BIN_CHANNEL and BIN_CHANNEL != -1001234567890:
                 log_msg = await message.copy(chat_id=BIN_CHANNEL)
                 bin_msg_id = log_msg.id
+        except FloodWait as fw:
+            logger.warning(f"FloodWait on BIN_CHANNEL copy: {fw.value}s")
+            bin_msg_id = None
         except Exception as copy_err:
             logger.warning(f"BIN_CHANNEL copy skipped (using direct file_id from MongoDB): {copy_err}")
 
@@ -467,20 +468,43 @@ async def media_handler(client: Client, message: Message):
             ]
         ])
 
-        await status_msg.edit_text(
+        reply_text_body = (
             f"🎬 **{doc['title']}**\n"
             f"📦 **Size:** `{file_size_mb} MB`\n\n"
             f"▶️ **Watch Video Link:**\n{watch_url}\n\n"
             f"⬇️ **Direct Download Link:**\n{dl_url}\n\n"
             f"📥 **Direct Quality Download:**\n"
             f"• [Download 480p]({dl_url}?quality=480p) | [Download 720p]({dl_url}?quality=720p) | [Download 1080p]({dl_url}?quality=1080p)\n\n"
-            f"👇 **নিচের বাটন থেকে কোয়ালিটি (480p, 720p, 1080p) সিলেক্ট করে ভিডিও দেখুন বা সরাসরি ডাউনলোড করুন:**",
-            reply_markup=buttons,
-            disable_web_page_preview=True
+            f"👇 **নিচের বাটন থেকে কোয়ালিটি (480p, 720p, 1080p) সিলেক্ট করে ভিডিও দেখুন বা সরাসরি ডাউনলোড করুন:**"
         )
+
+        # Send response directly without messages.EditMessage (avoids Telegram 420 FLOOD_WAIT_X)
+        for attempt in range(4):
+            try:
+                await message.reply_text(
+                    reply_text_body,
+                    reply_markup=buttons,
+                    disable_web_page_preview=True,
+                    quote=True
+                )
+                break
+            except FloodWait as fw:
+                wait_sec = int(fw.value) or 1
+                logger.warning(f"Telegram FloodWait on reply: {wait_sec}s")
+                if wait_sec <= 10:
+                    await asyncio.sleep(wait_sec)
+                else:
+                    await asyncio.sleep(2)
+            except Exception as send_err:
+                logger.error(f"Error sending reply on attempt {attempt}: {send_err}")
+                await asyncio.sleep(1)
+
     except Exception as err:
         logger.error(f"Error handling media: {err}")
-        await status_msg.edit_text(f"❌ Error generating link: `{err}`")
+        try:
+            await message.reply_text(f"❌ Error generating link: `{err}`", quote=True)
+        except Exception:
+            pass
 
 
 @bot.on_callback_query()
@@ -612,36 +636,52 @@ async def watch_video(stream_id: str, q: str = ""):
     html, body {{
       width:100%; height:100%; max-width:100vw; max-height:100dvh;
       overflow:hidden !important; position:fixed !important; inset:0 !important;
-      background:#000; color:#f8fafc; font-family:system-ui,-apple-system,sans-serif;
+      background:#070b13; color:#f8fafc; font-family:system-ui,-apple-system,sans-serif;
       overscroll-behavior:none !important;
       user-select:none; -webkit-user-select:none;
     }}
     .screen-wrapper {{
       width:100vw; height:100dvh; display:flex; flex-direction:column;
-      justify-content:center; align-items:center; overflow:hidden; background:#000;
+      justify-content:center; align-items:center; overflow:hidden; background:#070b13;
+      padding:0;
     }}
-    .player-card {{ width:100%; max-width:960px; height:100%; display:flex; flex-direction:column; justify-content:center; align-items:center; }}
+    .player-card {{
+      width:100%; max-width:850px; display:flex; flex-direction:column;
+      justify-content:center; align-items:center; position:relative;
+    }}
+    /* Photo 3 Style: Compact 16:9 Player Box in Center of Screen */
     .video-box {{
-      width:100%; height:100%; max-height:100dvh; background:#000;
-      position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center;
-      cursor:pointer;
+      width:100%;
+      aspect-ratio:16 / 9;
+      max-height:56.25vw;
+      background:#000;
+      position:relative;
+      overflow:hidden;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      box-shadow:0 12px 40px rgba(0,0,0,0.85);
+      border-radius:0;
+    }}
+    @media (min-width:640px) {{
+      .video-box {{ border-radius:12px; }}
     }}
     video {{
-      width:100%; height:100%; max-height:100dvh; object-fit:contain;
+      width:100%; height:100%; object-fit:contain;
       display:block; background:#000;
     }}
     .center-action-btn {{
       position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) scale(1);
-      width:80px; height:80px; border-radius:50%;
-      background:rgba(15,23,42,0.85); border:2.5px solid rgba(255,255,255,0.4);
-      display:flex; align-items:center; justify-content:center; font-size:36px;
+      width:66px; height:66px; border-radius:50%;
+      background:rgba(15,23,42,0.85); border:2px solid rgba(255,255,255,0.35);
+      display:flex; align-items:center; justify-content:center; font-size:28px;
       color:#fff; cursor:pointer; opacity:1;
-      transition:opacity 0.28s ease, transform 0.22s cubic-bezier(0.4,0,0.2,1);
-      z-index:35; box-shadow:0 10px 35px rgba(0,0,0,0.75);
-      backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+      transition:opacity 0.25s ease, transform 0.2s cubic-bezier(0.4,0,0.2,1);
+      z-index:35; box-shadow:0 8px 30px rgba(0,0,0,0.75);
+      backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
     }}
     .center-action-btn:hover {{
-      background:rgba(15,23,42,0.95); border-color:#10b981; transform:translate(-50%,-50%) scale(1.08);
+      background:rgba(15,23,42,0.95); border-color:#10b981; transform:translate(-50%,-50%) scale(1.06);
     }}
     .center-action-btn:active {{
       transform:translate(-50%,-50%) scale(0.92);
@@ -650,36 +690,18 @@ async def watch_video(stream_id: str, q: str = ""):
       opacity:0; pointer-events:none; transform:translate(-50%,-50%) scale(0.7);
     }}
     .quality-pill {{
-      position:absolute; top:16px; right:16px; z-index:30;
-      background:rgba(15,23,42,0.85); border:1px solid rgba(255,255,255,0.25);
-      color:#f8fafc; font-size:12px; font-weight:700; padding:6px 12px; border-radius:8px; cursor:pointer;
-      backdrop-filter:blur(8px);
+      position:absolute; top:12px; right:12px; z-index:30;
+      background:rgba(15,23,42,0.85); border:1px solid rgba(255,255,255,0.28);
+      color:#f8fafc; font-size:11px; font-weight:700; padding:5px 11px; border-radius:7px; cursor:pointer;
+      backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+      box-shadow:0 4px 15px rgba(0,0,0,0.6);
       transition:opacity 0.25s ease;
     }}
     .quality-pill.ctrl-hidden {{
       opacity:0; pointer-events:none;
     }}
-    .custom-controls {{
-      position:absolute; left:0; right:0; bottom:0; z-index:28;
-      padding:24px 16px 12px;
-      background:linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.6) 65%, transparent 100%);
-      display:flex; flex-direction:column; gap:8px;
-      transition:opacity 0.25s ease;
-    }}
-    .custom-controls.ctrl-hidden {{
-      opacity:0; pointer-events:none;
-    }}
-    .seek-range {{
-      width:100%; accent-color:#10b981; cursor:pointer; height:8px;
-      border-radius:999px; -webkit-appearance:none; background:rgba(255,255,255,0.25);
-      touch-action:manipulation;
-    }}
-    .seek-range::-webkit-slider-thumb {{
-      -webkit-appearance:none; width:16px; height:16px; border-radius:50%;
-      background:#10b981; cursor:pointer; box-shadow:0 0 10px rgba(16,185,129,0.8);
-    }}
     .tap-overlay {{
-      position:absolute; top:0; bottom:60px; width:45%; z-index:25;
+      position:absolute; top:0; bottom:40px; width:45%; z-index:25;
       display:flex; align-items:center; justify-content:center;
       pointer-events:none; opacity:0; transition:opacity 0.25s ease;
     }}
@@ -688,15 +710,9 @@ async def watch_video(stream_id: str, q: str = ""):
     .tap-overlay.active {{ opacity:1; background:rgba(255,255,255,0.08); }}
     .tap-badge {{
       background:rgba(15,23,42,0.9); border:1px solid rgba(255,255,255,0.25);
-      padding:10px 18px; border-radius:999px; font-size:15px; font-weight:700;
-      color:#10b981; box-shadow:0 8px 24px rgba(0,0,0,0.7);
+      padding:8px 16px; border-radius:999px; font-size:13px; font-weight:700;
+      color:#10b981; box-shadow:0 6px 20px rgba(0,0,0,0.7);
     }}
-    .ctrl-row {{ display:flex; align-items:center; justify-content:space-between; font-size:13px; font-weight:700; }}
-    .ctrl-btn {{
-      background:rgba(255,255,255,0.14); border:1px solid rgba(255,255,255,0.18);
-      color:#fff; border-radius:8px; padding:6px 10px; font-size:13px; font-weight:700; cursor:pointer;
-    }}
-    .ctrl-btn:hover {{ background:rgba(255,255,255,0.22); }}
     .quality-modal-backdrop {{
       position:fixed; inset:0; background:rgba(5,8,15,0.88); backdrop-filter:blur(10px);
       z-index:100; display:flex; align-items:center; justify-content:center; padding:20px;
@@ -724,6 +740,7 @@ async def watch_video(stream_id: str, q: str = ""):
   <div class="screen-wrapper">
     <div class="player-card">
       <div class="video-box" id="video-box">
+        <!-- Quality Selector Pill (Photo 3 Style at top right inside video) -->
         <button type="button" class="quality-pill" onclick="event.stopPropagation(); document.getElementById('q-modal').classList.remove('hidden')">
           <span id="ql">{initial_q}</span> ⚙️
         </button>
@@ -741,18 +758,16 @@ async def watch_video(stream_id: str, q: str = ""):
           <span id="center-btn-icon">▶️</span>
         </button>
 
-        <video id="v" playsinline webkit-playsinline preload="auto" src="{stream_url}?quality={initial_q}"></video>
-
-        <div class="custom-controls" id="custom-ctrls" onclick="event.stopPropagation();">
-          <input id="seekbar" class="seek-range" type="range" min="0" max="{duration_sec}" step="1" value="0" />
-          <div class="ctrl-row">
-            <div style="display:flex;align-items:center;gap:12px;">
-              <button type="button" class="ctrl-btn" id="btn-play" onclick="togglePlay()">▶️ Play</button>
-              <span id="tl" style="color:#94a3b8;font-size:13px;">0:00 / 0:00</span>
-            </div>
-            <button type="button" class="ctrl-btn" onclick="toggleFullscreen()">⛶ Fullscreen</button>
-          </div>
-        </div>
+        <!-- Compact 16:9 Video with native sleek controls (Photo 3 Style) -->
+        <video
+          id="v"
+          playsinline
+          webkit-playsinline
+          controls
+          controlsList="nodownload"
+          preload="auto"
+          src="{stream_url}?quality={initial_q}"
+        ></video>
       </div>
     </div>
   </div>
@@ -785,37 +800,25 @@ async def watch_video(stream_id: str, q: str = ""):
 
     const v = document.getElementById('v');
     const box = document.getElementById('video-box');
-    const seekbar = document.getElementById('seekbar');
-    const tl = document.getElementById('tl');
     const centerBtn = document.getElementById('center-play-btn');
     const centerIcon = document.getElementById('center-btn-icon');
-    const customCtrls = document.getElementById('custom-ctrls');
     const qualityPill = document.querySelector('.quality-pill');
-    const btnPlay = document.getElementById('btn-play');
 
-    let totalDur = {duration_sec}, isScrubbing = false;
     let controlsVisible = true;
     let autoHideTimer = null;
-
-    function fmt(s) {{
-      s = Math.max(0, Math.floor(s || 0));
-      const m = Math.floor(s / 60), r = s % 60;
-      return m + ':' + (r < 10 ? '0' : '') + r;
-    }}
 
     function resetAutoHide() {{
       if (autoHideTimer) clearTimeout(autoHideTimer);
       if (!v.paused && controlsVisible) {{
         autoHideTimer = setTimeout(() => {{
           hideControls();
-        }}, 3200);
+        }}, 2600);
       }}
     }}
 
     function showControls() {{
       controlsVisible = true;
       centerBtn.classList.remove('ctrl-hidden');
-      customCtrls.classList.remove('ctrl-hidden');
       if (qualityPill) qualityPill.classList.remove('ctrl-hidden');
       resetAutoHide();
     }}
@@ -824,8 +827,6 @@ async def watch_video(stream_id: str, q: str = ""):
       if (!v.paused) {{
         controlsVisible = false;
         centerBtn.classList.add('ctrl-hidden');
-        customCtrls.classList.add('ctrl-hidden');
-        if (qualityPill) qualityPill.classList.add('ctrl-hidden');
       }}
     }}
 
@@ -840,11 +841,9 @@ async def watch_video(stream_id: str, q: str = ""):
     function syncPlayState(isPlaying) {{
       if (isPlaying) {{
         centerIcon.textContent = '⏸️';
-        btnPlay.textContent = '⏸️ Pause';
         resetAutoHide();
       }} else {{
         centerIcon.textContent = '▶️';
-        btnPlay.textContent = '▶️ Play';
         showControls();
       }}
     }}
@@ -878,16 +877,28 @@ async def watch_video(stream_id: str, q: str = ""):
       setTimeout(() => el.classList.remove('active'), 450);
     }}
 
+    function seekRelative(delta) {{
+      const totalDur = (v.duration && isFinite(v.duration)) ? v.duration : 1420;
+      const nextTime = Math.max(0, Math.min(totalDur - 1, (v.currentTime || 0) + delta));
+      v.currentTime = nextTime;
+    }}
+
     // SMART SCREEN GESTURE:
     // Single-Tap on screen: Shows the Pause/Play button (অফ/অন করার বাটন) or hides controls if already shown!
     // Double-Tap Right: +10s
     // Double-Tap Left: -10s
     box.addEventListener('click', function(e) {{
-      if (e.target.closest('#custom-ctrls') || e.target.closest('.quality-pill') || e.target.closest('#q-modal') || e.target.closest('#center-play-btn')) return;
+      if (e.target.closest('.quality-pill') || e.target.closest('#q-modal') || e.target.closest('#center-play-btn')) return;
 
       const rect = box.getBoundingClientRect();
       const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
       const width = rect.width;
+      const height = rect.height;
+
+      // If user tapped on native control bar at bottom of video, don't trigger center tap
+      if (clickY > height - 48) return;
+
       const currentTime = Date.now();
       const diffTime = currentTime - lastTapTime;
 
@@ -910,65 +921,19 @@ async def watch_video(stream_id: str, q: str = ""):
         }}
         lastTapTime = 0;
       }} else {{
-        // Single tap: Schedule toggleControls after 280ms if not followed by a second tap
+        // Single tap: Schedule toggleControls after 260ms if not followed by a second tap
         lastTapTime = currentTime;
         lastTapX = clickX;
         if (tapTimer) clearTimeout(tapTimer);
         tapTimer = setTimeout(() => {{
           toggleControls();
           tapTimer = null;
-        }}, 280);
+        }}, 260);
       }}
     }});
 
     v.addEventListener('play', () => {{ syncPlayState(true); }});
     v.addEventListener('pause', () => {{ syncPlayState(false); }});
-
-    v.addEventListener('loadedmetadata', function() {{
-      if (v.duration && isFinite(v.duration) && v.duration > 1) {{
-        totalDur = Math.floor(v.duration);
-        seekbar.max = String(totalDur);
-      }}
-    }});
-
-    v.addEventListener('timeupdate', function() {{
-      if (!isScrubbing) {{
-        const cur = v.currentTime || 0;
-        seekbar.value = String(Math.floor(cur));
-        tl.textContent = fmt(cur) + ' / ' + fmt(totalDur);
-      }}
-    }});
-
-    // SMOOTH TIMELINE DRAGGING (টানাপোড়েন)
-    seekbar.addEventListener('input', function() {{
-      isScrubbing = true;
-      tl.textContent = fmt(Number(seekbar.value)) + ' / ' + fmt(totalDur);
-    }});
-
-    seekbar.addEventListener('change', function() {{
-      isScrubbing = false;
-      const target = Number(seekbar.value);
-      if (isFinite(v.duration) && v.duration > 0) {{
-        v.currentTime = target;
-      }} else {{
-        v.currentTime = target;
-      }}
-    }});
-
-    function seekRelative(delta) {{
-      const nextTime = Math.max(0, Math.min(totalDur - 1, (v.currentTime || 0) + delta));
-      v.currentTime = nextTime;
-    }}
-
-    function toggleFullscreen() {{
-      if (document.fullscreenElement) {{
-        document.exitFullscreen().catch(() => {{}});
-      }} else if (box.requestFullscreen) {{
-        box.requestFullscreen().catch(() => {{}});
-      }} else if (v.webkitEnterFullscreen) {{
-        v.webkitEnterFullscreen();
-      }}
-    }}
 
     function setQ(q) {{
       document.getElementById('ql').textContent = q;
@@ -978,7 +943,6 @@ async def watch_video(stream_id: str, q: str = ""):
       v.load();
       v.currentTime = savedTime;
       v.play().catch(() => {{}});
-      flashBadge('⚙️ ' + q);
     }}
 
     // KEYBOARD SHORTCUTS
@@ -986,7 +950,6 @@ async def watch_video(stream_id: str, q: str = ""):
       if (e.code === 'Space') {{ e.preventDefault(); togglePlay(); }}
       else if (e.code === 'ArrowRight') {{ e.preventDefault(); seekRelative(10); }}
       else if (e.code === 'ArrowLeft') {{ e.preventDefault(); seekRelative(-10); }}
-      else if (e.code === 'KeyF') {{ e.preventDefault(); toggleFullscreen(); }}
     }});
   </script>
 </body>
