@@ -10,13 +10,12 @@ import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, HTMLResponse, Response
+from fastapi.responses import StreamingResponse, HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from hydrogram import Client, filters
+from hydrogram import Client, filters, idle
 from hydrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from hydrogram.errors import FloodWait
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -24,26 +23,28 @@ logging.basicConfig(
 logger = logging.getLogger("SRVideoQualityBot")
 
 # ==============================================================================
-# CONFIGURATION & ENVIRONMENT VARIABLES
+# CONFIGURATION & YOUR ROOT ADMIN ID (8056243176)
 # ==============================================================================
 MONGO_URI = os.environ.get(
     "MONGO_URI",
-    "mongodb+srv://srvideo:srvideo123@cluster0.mongodb.net/?retryWrites=true&w=majority"
+    "mongodb+srv://sabbirvai1122:SABBIRVAI1122@cluster0.t1bsiei.mongodb.net/?appName=Cluster0"
 )
-API_ID = int(os.environ.get("API_ID", "1234567"))
-API_HASH = os.environ.get("API_HASH", "your_api_hash")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
-BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL", "-1001234567890"))
+API_ID = int(os.environ.get("API_ID", "29608422"))
+API_HASH = os.environ.get("API_HASH", "3db2f8e109301f02f5d9c8f10dd79244")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+BIN_CHANNEL = int(os.environ.get("BIN_CHANNEL", "-1004450462812"))
 PORT = int(os.environ.get("PORT", 8080))
 
-# ADMIN ID RESTRICTION (Only Admin Can Upload/Generate Links)
-ADMINS_RAW = os.environ.get("ADMINS", "").strip()
+# আপনার অ্যাডমিন আইডি সরাসরি যুক্ত:
+ADMINS_RAW = os.environ.get("ADMINS", "8056243176").strip()
 ADMINS = [int(x) for x in re.findall(r"\d+", ADMINS_RAW)]
+if 8056243176 not in ADMINS:
+    ADMINS.append(8056243176)
 
 RAW_DOMAIN = (
     os.environ.get("RENDER_EXTERNAL_URL")
     or os.environ.get("DOMAIN")
-    or "your-bot.onrender.com"
+    or "https://ss-anime-file-to-link.onrender.com"
 ).strip().rstrip("/")
 
 if not RAW_DOMAIN.startswith(("http://", "https://")):
@@ -52,7 +53,7 @@ else:
     DOMAIN = RAW_DOMAIN
 
 # ==============================================================================
-# MONGODB ATLAS INITIALIZATION
+# MONGODB ATLAS
 # ==============================================================================
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client["SRVideoQualityBot"]
@@ -60,31 +61,27 @@ videos_col = db["videos"]
 users_col = db["users"]
 admins_col = db["admins"]
 locks_col = db["message_locks"]
-PROCESSED_MSG_KEYS = set()
+PROCESSED_KEYS = set()
 
 async def check_is_admin(user_id: int) -> bool:
-    """Check if a Telegram user is authorized as an Admin."""
-    if not ADMINS:
-        return True  # If no root admin is defined, allow access
     if user_id in ADMINS:
         return True
     try:
         doc = await admins_col.find_one({"id": user_id})
         return bool(doc)
     except Exception as exc:
-        logger.warning(f"Error checking admin status: {exc}")
+        logger.warning(f"Error checking admin: {exc}")
         return False
 
-# Initialize Hydrogram Bot Client & FastAPI App
 bot = Client(
     "SR_Video_Quality_Bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
+    bot_token=BOT_TOKEN if BOT_TOKEN else None,
     in_memory=True
 )
 
-web_app = FastAPI(title="SR-VIDEO-QUALITY Streaming Server", version="3.0.0")
+web_app = FastAPI(title="SR-VIDEO-QUALITY Streaming Server", version="3.2.0")
 
 web_app.add_middleware(
     CORSMiddleware,
@@ -95,30 +92,28 @@ web_app.add_middleware(
     expose_headers=["Content-Range", "Content-Length", "Accept-Ranges", "Content-Disposition"],
 )
 
-# ==============================================================================
-# KEEP-ALIVE TASK (Prevents Render Sleep)
-# ==============================================================================
 async def keep_alive_ping():
-    await asyncio.sleep(10)
+    await asyncio.sleep(15)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                async with session.get(f"{DOMAIN}/health", timeout=15) as resp:
+                async with session.get(f"{DOMAIN}/health", timeout=10) as resp:
                     logger.info(f"Keep-alive ping to {DOMAIN}/health -> {resp.status}")
-            except Exception as exc:
-                logger.warning(f"Keep-alive ping warning: {exc}")
+            except Exception:
+                pass
             await asyncio.sleep(240)
 
 # ==============================================================================
-# TELEGRAM BOT HANDLERS & DYNAMIC ADMIN MANAGEMENT
+# BOT HANDLERS & DYNAMIC ADMIN SYSTEM
 # ==============================================================================
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
+    user_id = message.from_user.id if message.from_user else 0
     if message.from_user:
         await users_col.update_one(
-            {"id": message.from_user.id},
+            {"id": user_id},
             {"$set": {
-                "id": message.from_user.id,
+                "id": user_id,
                 "name": message.from_user.first_name,
                 "username": message.from_user.username,
                 "updated_at": datetime.utcnow().isoformat()
@@ -126,38 +121,30 @@ async def start_handler(client: Client, message: Message):
             upsert=True
         )
 
-    user_id = message.from_user.id if message.from_user else 0
     is_user_admin = await check_is_admin(user_id)
     if not is_user_admin:
         await message.reply_text(
             "👋 **স্বাগতম!**\n\n"
-            "🔒 **এই বটটি শুধুমাত্র অনুমোদিত অ্যাডমিনের ব্যবহারের জন্য সংরক্ষিত।**\n\n"
+            "🔒 **এই বটটি শুধুমাত্র অ্যাডমিনদের ব্যবহারের জন্য সংরক্ষিত।**\n\n"
             f"👤 **আপনার টেলিগ্রাম আইডি:** `{user_id}`\n\n"
-            "💡 **অ্যাডমিন হতে চান?**\n"
-            "আপনার এই আইডিটি মেইন অ্যাডমিনকে পাঠান। মেইন অ্যাডমিন বটের মধ্যে `/addadmin "
-            f"{user_id}` লিখলেই আপনি অ্যাডমিন হয়ে যাবেন এবং ভিডিও আপলোড করে লিঙ্ক বানাতে পারবেন।\n\n"
-            "🌐 তবে অ্যাডমিনদের তৈরি করা যেকোনো ভিডিও আপনি যেকোনো ব্রাউজারে দেখতে ও ডাউনলোড করতে পারবেন।"
+            "💡 আপনি যদি অ্যাডমিন হতে চান তবে আপনার এই আইডিটি মেইন অ্যাডমিনকে পাঠান।"
         )
         return
 
     await message.reply_text(
-        "🎬 **SR-VIDEO-QUALITY Bot is Online!**\n\n"
-        "Send or forward any Video / MKV / MP4 file to me and I will generate "
-        "instant **1080p, 720p, 480p, and 360p** streaming & fast download links.\n\n"
-        f"🌐 **Active Domain:** `{DOMAIN}`\n"
-        f"👑 **Admin Status:** Authorized (`{user_id}`)\n\n"
-        "🛠️ **অ্যাডমিন কমান্ডসমূহ (Admin Management):**\n"
-        "• `/addadmin <user_id>` বা রিপ্লাই করে কাউকে অ্যাডমিন বানান\n"
-        "• `/deladmin <user_id>` কাউকে অ্যাডমিন থেকে বাদ দিন\n"
-        "• `/admins` সকল অ্যাডমিনের তালিকা দেখুন"
+        "🎬 **SR-VIDEO-QUALITY Bot Online!**\n\n"
+        "ভিডিও ফাইল পাঠালে সাথে সাথে **1080p, 720p, 480p** স্ট্রিমিং ও ফাস্ট ডাউনলোড লিঙ্ক তৈরি হবে।\n\n"
+        f"🌐 **অ্যাক্টিভ ডোমেইন:** `{DOMAIN}`\n"
+        f"👑 **আপনার অ্যাডমিন স্ট্যাটাস:** Authorized (`{user_id}`)\n\n"
+        "🛠️ **অ্যাডমিন কমান্ডসমূহ:**\n"
+        "• `/addadmin <id>` - নতুন কাউকে অ্যাডমিন বানান\n"
+        "• `/deladmin <id>` - কাউকে অ্যাডমিন থেকে বাদ দিন\n"
+        "• `/admins` - সকল অ্যাডমিনের তালিকা দেখুন"
     )
 
 @bot.on_message(filters.command(["addadmin", "promote"]) & filters.private)
 async def add_admin_handler(client: Client, message: Message):
-    if not message.from_user:
-        return
-    if not await check_is_admin(message.from_user.id):
-        await message.reply_text("⛔ শুধুমাত্র অনুমোদিত অ্যাডমিনরাই নতুন অ্যাডমিন তৈরি করতে পারেন।")
+    if not message.from_user or not await check_is_admin(message.from_user.id):
         return
 
     target_id = None
@@ -171,126 +158,63 @@ async def add_admin_handler(client: Client, message: Message):
             try:
                 target_id = int(parts[1])
             except ValueError:
-                await message.reply_text("❌ অবৈধ আইডি! সঠিক আইডি লিখুন। উদাহরণ: `/addadmin 6284918234`")
+                await message.reply_text("❌ আইডি সঠিক নয়! উদাহরণ: `/addadmin 12345678`")
                 return
 
     if not target_id:
-        await message.reply_text(
-            "📌 **নতুন কাউকে অ্যাডমিন বানানোর উপায়:**\n\n"
-            "১. ইউজারের আইডি দিয়ে কমান্ড দিন:\n"
-            "`/addadmin <user_id>`\n"
-            "উদাহরণ: `/addadmin 6284918234`\n\n"
-            "২. অথবা ইউজারের কোনো মেসেজে রিপ্লাই (Reply) করে লিখুন:\n"
-            "`/addadmin`"
-        )
+        await message.reply_text("📌 ব্যবহার: `/addadmin <user_id>` অথবা কোনো মেসেজে রিপ্লাই করে লিখুন `/addadmin`")
         return
 
-    try:
-        await admins_col.update_one(
-            {"id": target_id},
-            {"$set": {
-                "id": target_id,
-                "name": target_name,
-                "added_by": message.from_user.id,
-                "added_at": datetime.utcnow().isoformat()
-            }},
-            upsert=True
-        )
-        await message.reply_text(
-            f"✅ **সফলভাবে নতুন অ্যাডমিন যুক্ত করা হয়েছে!**\n\n"
-            f"👤 **অ্যাডমিন আইডি:** `{target_id}`\n"
-            f"👑 **যুক্ত করেছেন:** `{message.from_user.id}`\n\n"
-            f"🎉 এখন থেকে এই ব্যক্তি বটে ভিডিও পাঠালে সরাসরি ফাইল কনভার্ট ও লিঙ্ক তৈরি করতে পারবেন।"
-        )
-    except Exception as err:
-        logger.error(f"Error adding admin: {err}")
-        await message.reply_text(f"❌ অ্যাডমিন যোগ করতে ব্যর্থ: `{err}`")
+    await admins_col.update_one(
+        {"id": target_id},
+        {"$set": {"id": target_id, "name": target_name, "added_by": message.from_user.id, "added_at": datetime.utcnow().isoformat()}},
+        upsert=True
+    )
+    await message.reply_text(f"✅ ইউজার `{target_id}` সফলভাবে নতুন অ্যাডমিন হিসেবে যুক্ত হয়েছেন!")
 
-@bot.on_message(filters.command(["deladmin", "removeadmin", "demote"]) & filters.private)
+@bot.on_message(filters.command(["deladmin", "demote"]) & filters.private)
 async def del_admin_handler(client: Client, message: Message):
-    if not message.from_user:
-        return
-    if not await check_is_admin(message.from_user.id):
-        await message.reply_text("⛔ শুধুমাত্র অ্যাডমিনরাই অ্যাডমিন পরিচালনা করতে পারেন।")
+    if not message.from_user or not await check_is_admin(message.from_user.id):
         return
 
-    target_id = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    else:
-        parts = message.text.strip().split()
-        if len(parts) > 1:
-            try:
-                target_id = int(parts[1])
-            except ValueError:
-                await message.reply_text("❌ অবৈধ আইডি! উদাহরণ: `/deladmin 6284918234`")
-                return
-
-    if not target_id:
-        await message.reply_text("📌 কাউকে অ্যাডমিন থেকে বাদ দিতে লিখুন: `/deladmin <user_id>`")
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.reply_text("📌 ব্যবহার: `/deladmin <user_id>`")
+        return
+    try:
+        target_id = int(parts[1])
+    except ValueError:
         return
 
     if target_id in ADMINS:
-        await message.reply_text("⚠️ এই আইডিটি মূল এনভায়রনমেন্ট ভ্যারিয়েবলের রুট অ্যাডমিন। এটি ডিলিট করা সম্ভব নয়।")
+        await message.reply_text("⚠️ এটি রুট মেইন অ্যাডমিন আইডি, এটি ডিলিট করা যাবে না।")
         return
 
-    try:
-        result = await admins_col.delete_one({"id": target_id})
-        if result.deleted_count > 0:
-            await message.reply_text(f"✅ ইউজার `{target_id}` কে সফলভাবে অ্যাডমিন তালিকা থেকে বাদ দেওয়া হয়েছে।")
-        else:
-            await message.reply_text(f"ℹ️ ইউজার `{target_id}` অ্যাডমিন তালিকায় পাওয়া যায়নি।")
-    except Exception as err:
-        logger.error(f"Error removing admin: {err}")
-        await message.reply_text(f"❌ ব্যর্থ: `{err}`")
+    await admins_col.delete_one({"id": target_id})
+    await message.reply_text(f"✅ অ্যাডমিন `{target_id}` কে ডিলিট করা হয়েছে।")
 
 @bot.on_message(filters.command("admins") & filters.private)
 async def list_admins_handler(client: Client, message: Message):
-    if not message.from_user:
-        return
-    if not await check_is_admin(message.from_user.id):
-        await message.reply_text("⛔ শুধুমাত্র অ্যাডমিনরাই এই তালিকা দেখতে পারবেন।")
+    if not message.from_user or not await check_is_admin(message.from_user.id):
         return
 
-    text = "👑 **অনুমোদিত অ্যাডমিনদের তালিকা:**\n\n"
-    if ADMINS:
-        text += "**Root Admins (Render Env):**\n"
-        for a_id in ADMINS:
-            text += f"• `{a_id}` (মেইন অ্যাডমিন)\n"
-        text += "\n"
+    text = "👑 **অ্যাডমিন তালিকা:**\n\n"
+    for a in ADMINS:
+        text += f"• `{a}` (Main Root Admin)\n"
 
-    try:
-        cursor = admins_col.find({})
-        dynamic_admins = await cursor.to_list(length=100)
-        if dynamic_admins:
-            text += "**Dynamic Admins (বট দিয়ে যুক্ত করা):**\n"
-            for d in dynamic_admins:
-                name_str = f" ({d.get('name')})" if d.get('name') else ""
-                text += f"• `{d['id']}`{name_str}\n"
-        else:
-            text += "বটের মাধ্যমে কোনো অতিরিক্ত অ্যাডমিন এখনও যুক্ত করা হয়নি।\n"
-    except Exception as err:
-        text += f"ডাটাবেজ থেকে তালিকা লোড করতে ত্রুটি: {err}\n"
+    cursor = admins_col.find({})
+    dyn = await cursor.to_list(length=100)
+    for d in dyn:
+        text += f"• `{d['id']}` (বট দিয়ে যুক্ত)\n"
 
-    text += "\n➕ নতুন অ্যাডমিন যোগ করতে: `/addadmin <id>`\n"
-    text += "➖ অ্যাডমিন বাদ দিতে: `/deladmin <id>`"
     await message.reply_text(text)
 
-# ==============================================================================
-# MEDIA HANDLER (WITH ADMIN ACCESS CHECK & DEDUPLICATION)
-# ==============================================================================
 @bot.on_message((filters.video | filters.document) & filters.private)
 async def media_handler(client: Client, message: Message):
-    if not message.from_user:
-        return
-
-    # Check Admin Restriction
-    if not await check_is_admin(message.from_user.id):
+    user_id = message.from_user.id if message.from_user else 0
+    if not await check_is_admin(user_id):
         await message.reply_text(
-            "🔒 **অনুমতি নেই (Permission Denied)**\n\n"
-            "শুধুমাত্র অনুমোদিত অ্যাডমিনরা এই বটে ভিডিও আপলোড করে লিঙ্ক তৈরি করতে পারেন।\n\n"
-            f"👤 **আপনার টেলিগ্রাম আইডি:** `{message.from_user.id}`\n\n"
-            "অ্যাডমিন হওয়ার জন্য আপনার আইডিটি মেইন অ্যাডমিনকে পাঠান।"
+            f"🔒 **অনুমতি নেই!** শুধুমাত্র অনুমোদিত অ্যাডমিনরা ভিডিও লিঙ্ক তৈরি করতে পারেন।\nআপনার আইডি: `{user_id}`"
         )
         return
 
@@ -298,326 +222,318 @@ async def media_handler(client: Client, message: Message):
     if not media:
         return
 
-    if message.document and not (media.mime_type and ("video" in media.mime_type or "octet-stream" in media.mime_type)):
+    key = f"{message.chat.id}:{message.id}"
+    if key in PROCESSED_KEYS:
         return
+    PROCESSED_KEYS.add(key)
 
-    msg_key = f"{message.chat.id}:{message.id}"
-    if msg_key in PROCESSED_MSG_KEYS:
-        return
-    PROCESSED_MSG_KEYS.add(msg_key)
-
-    try:
-        lock_res = await locks_col.update_one(
-            {"_id": msg_key},
-            {"$setOnInsert": {"created_at": datetime.utcnow().isoformat()}},
-            upsert=True
-        )
-        if lock_res.matched_count > 0:
-            return
-    except Exception:
-        pass
-
-    status_msg = await message.reply_text("⚡ **ফাইল প্রসেসিং হচ্ছে... অনুগ্রহ করে একটু অপেক্ষা করুন...**")
+    status_msg = await message.reply_text("⚡ **লিঙ্ক তৈরি হচ্ছে... অপেক্ষা করুন...**")
 
     try:
         fwd_msg = await message.forward(BIN_CHANNEL)
-    except FloodWait as f_err:
-        await asyncio.sleep(f_err.value)
+    except FloodWait as f:
+        await asyncio.sleep(f.value)
         fwd_msg = await message.forward(BIN_CHANNEL)
-    except Exception as exc:
-        logger.error(f"Forwarding to BIN_CHANNEL failed: {exc}")
-        await status_msg.edit_text(f"❌ চ্যানেল ফরোয়ার্ড ব্যর্থ হয়েছে: {exc}")
+    except Exception as err:
+        await status_msg.edit_text(f"❌ চ্যানেল ফরোয়ার্ড ব্যর্থ: {err}")
         return
 
+    fwd_id = fwd_msg.id
     file_name = getattr(media, "file_name", None) or f"Video_{int(time.time())}.mp4"
     file_size = getattr(media, "file_size", 0)
     mime_type = getattr(media, "mime_type", "video/mp4")
-    fwd_id = fwd_msg.id
-    tg_file_id = getattr(media, "file_id", "")
+    duration = getattr(media, "duration", 120) or 120
 
-    # Save to MongoDB Atlas for permanent storage
-    video_record = {
+    doc = {
         "channel_msg_id": fwd_id,
+        "id": f"tg-{fwd_id}",
         "file_name": file_name,
         "file_size": file_size,
         "mime_type": mime_type,
-        "file_id": tg_file_id,
-        "user_id": message.from_user.id if message.from_user else None,
+        "duration": duration,
+        "file_id": getattr(media, "file_id", ""),
         "created_at": datetime.utcnow().isoformat()
     }
-    try:
-        await videos_col.update_one(
-            {"channel_msg_id": fwd_id},
-            {"$set": video_record},
-            upsert=True
-        )
-    except Exception as db_err:
-        logger.error(f"MongoDB save failed: {db_err}")
+    await videos_col.update_one({"channel_msg_id": fwd_id}, {"$set": doc}, upsert=True)
+    await videos_col.update_one({"id": f"tg-{fwd_id}"}, {"$set": doc}, upsert=True)
 
     stream_url = f"{DOMAIN}/watch/{fwd_id}"
-    download_url = f"{DOMAIN}/download/{fwd_id}"
+    dl_url = f"{DOMAIN}/download/{fwd_id}"
 
     btn = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 Watch Online (Streaming)", url=stream_url)],
-        [InlineKeyboardButton("🚀 Fast Download", url=download_url)],
-        [InlineKeyboardButton("🔗 Copy Quality Links", callback_data=f"qualities_{fwd_id}")]
+        [InlineKeyboardButton("🎬 Watch Video", url=stream_url)],
+        [InlineKeyboardButton("🚀 Direct Download", url=dl_url)]
     ])
 
-    size_mb = file_size / (1024 * 1024)
-    size_str = f"{size_mb:.2f} MB" if size_mb < 1024 else f"{(size_mb / 1024):.2f} GB"
-
+    size_mb = round(file_size / (1024 * 1024), 2)
     await status_msg.edit_text(
         f"🎬 **ফাইল সফলভাবে রেডি হয়েছে!**\n\n"
         f"📁 **ফাইল:** `{file_name}`\n"
-        f"📦 **সাইজ:** `{size_str}`\n"
-        f"📺 **সব কোয়ালিটি সাপোর্ট:** 1080p | 720p | 480p | 360p\n\n"
-        f"🔗 **অনলাইন লিঙ্ক:**\n{stream_url}\n\n"
-        f"🚀 **ডাউনলোড লিঙ্ক:**\n{download_url}",
+        f"📦 **সাইজ:** `{size_mb} MB`\n\n"
+        f"▶️ **ভিডিও দেখার লিঙ্ক:**\n{stream_url}\n\n"
+        f"⬇️ **ডাউনলোড লিঙ্ক:**\n{dl_url}",
         reply_markup=btn,
         disable_web_page_preview=True
     )
 
-@bot.on_callback_query(filters.regex(r"^qualities_(\d+)"))
-async def callback_qualities(client: Client, query: CallbackQuery):
-    msg_id = query.data.split("_")[1]
-    text = (
-        f"🎬 **মাল্টি-কোয়ালিটি ভিডিও লিঙ্কসমূহ:**\n\n"
-        f"• **1080p FHD:** {DOMAIN}/stream/{msg_id}?q=1080\n"
-        f"• **720p HD:** {DOMAIN}/stream/{msg_id}?q=720\n"
-        f"• **480p SD:** {DOMAIN}/stream/{msg_id}?q=480\n"
-        f"• **360p Low:** {DOMAIN}/stream/{msg_id}?q=360\n\n"
-        f"🌐 **অনলাইন প্লেয়ার:** {DOMAIN}/watch/{msg_id}"
-    )
-    await query.message.reply_text(text, disable_web_page_preview=True)
-    await query.answer()
+# ==============================================================================
+# FASTAPI ENDPOINTS & WEB PLAYER (With Double-Tap 10s Seek)
+# ==============================================================================
+@web_app.api_route("/health", methods=["GET", "HEAD"])
+async def health():
+    return JSONResponse({"status": "healthy", "domain": DOMAIN, "admin": 8056243176})
 
-# ==============================================================================
-# FAST STREAMING LOGIC & CHUNKING
-# ==============================================================================
-def parse_byte_range(range_header: str, file_size: int) -> Tuple[int, int]:
+def parse_range(range_header: str, file_size: int):
     if not range_header or "=" not in range_header:
         return 0, file_size - 1
-    unit, values = range_header.split("=", 1)
-    if unit.strip().lower() != "bytes":
-        return 0, file_size - 1
+    _, vals = range_header.split("=", 1)
+    pts = vals.split("-")
+    start = int(pts[0]) if pts[0] else 0
+    end = int(pts[1]) if len(pts) > 1 and pts[1] else file_size - 1
+    return min(start, file_size - 1), min(end, file_size - 1)
 
-    parts = values.split("-")
-    start_str = parts[0].strip()
-    end_str = parts[1].strip() if len(parts) > 1 else ""
+async def byte_streamer(client: Client, chat_id: int, message_id: int, start: int, end: int):
+    part_size = 1024 * 1024
+    start_part = start // part_size
+    offset = start % part_size
+    total = (end - start) + 1
+    sent = 0
 
-    if start_str and end_str:
-        start = int(start_str)
-        end = int(end_str)
-    elif start_str:
-        start = int(start_str)
-        end = file_size - 1
-    elif end_str:
-        start = max(0, file_size - int(end_str))
-        end = file_size - 1
-    else:
-        start = 0
-        end = file_size - 1
-
-    end = min(end, file_size - 1)
-    return start, end
-
-async def telegram_byte_streamer(client: Client, chat_id: int, message_id: int, start_byte: int, end_byte: int):
-    part_size = 1024 * 1024  # 1MB
-    start_part = start_byte // part_size
-    offset_in_part = start_byte % part_size
-    total_to_send = (end_byte - start_byte) + 1
-    bytes_sent = 0
-
-    try:
-        msg = await client.get_messages(chat_id, message_ids=message_id)
-        if not msg:
-            return
-        async for chunk in client.stream_media(msg, offset=start_part):
-            if not chunk:
-                break
-            if offset_in_part > 0:
-                if len(chunk) <= offset_in_part:
-                    offset_in_part -= len(chunk)
-                    continue
-                else:
-                    chunk = chunk[offset_in_part:]
-                    offset_in_part = 0
-
-            remaining = total_to_send - bytes_sent
-            if remaining <= 0:
-                break
-
-            if len(chunk) > remaining:
-                chunk = chunk[:remaining]
-
-            bytes_sent += len(chunk)
-            yield chunk
-
-            if bytes_sent >= total_to_send:
-                break
-    except Exception as exc:
-        logger.error(f"Stream error: {exc}")
+    msg = await client.get_messages(chat_id, message_ids=message_id)
+    if not msg:
         return
+    async for chunk in client.stream_media(msg, offset=start_part):
+        if not chunk:
+            break
+        if offset > 0:
+            if len(chunk) <= offset:
+                offset -= len(chunk)
+                continue
+            chunk = chunk[offset:]
+            offset = 0
 
-# ==============================================================================
-# FASTAPI ENDPOINTS & WEB PLAYER
-# ==============================================================================
-@web_app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "bot_connected": bot.is_connected if hasattr(bot, "is_connected") else True,
-        "domain": DOMAIN,
-        "timestamp": int(time.time())
-    }
+        rem = total - sent
+        if rem <= 0:
+            break
+        if len(chunk) > rem:
+            chunk = chunk[:rem]
+        sent += len(chunk)
+        yield chunk
+        if sent >= total:
+            break
 
-@web_app.get("/stream/{message_id}")
-@web_app.get("/download/{message_id}")
-async def stream_or_download_video(message_id: int, request: Request, q: Optional[str] = None):
-    try:
-        channel_msg = await bot.get_messages(BIN_CHANNEL, message_ids=message_id)
-    except Exception as exc:
-        logger.error(f"Failed to fetch telegram message {message_id}: {exc}")
-        channel_msg = None
+@web_app.get("/stream/{vid}")
+@web_app.get("/download/{vid}")
+@web_app.get("/dl/{vid}")
+async def stream_download_route(vid: str, request: Request, q: Optional[str] = None):
+    clean_id = vid.replace("tg-", "")
+    num_id = int(clean_id) if clean_id.isdigit() else 0
 
-    file_size = 0
-    file_name = f"Video_{message_id}.mp4"
-    mime_type = "video/mp4"
+    doc = await videos_col.find_one({
+        "$or": [{"channel_msg_id": num_id}, {"id": vid}, {"id": f"tg-{clean_id}"}]
+    })
 
-    if channel_msg:
-        media = channel_msg.video or channel_msg.document
-        if media:
-            file_size = getattr(media, "file_size", 0)
-            file_name = getattr(media, "file_name", file_name)
-            mime_type = getattr(media, "mime_type", mime_type)
+    file_size = doc.get("file_size", 0) if doc else 0
+    file_name = doc.get("file_name", f"Video_{vid}.mp4") if doc else f"Video_{vid}.mp4"
+    mime_type = doc.get("mime_type", "video/mp4") if doc else "video/mp4"
+
+    if file_size == 0 and num_id > 0:
+        try:
+            m = await bot.get_messages(BIN_CHANNEL, message_ids=num_id)
+            if m and (m.video or m.document):
+                med = m.video or m.document
+                file_size = getattr(med, "file_size", 0)
+                file_name = getattr(med, "file_name", file_name)
+        except Exception:
+            pass
 
     if file_size == 0:
-        doc = await videos_col.find_one({"channel_msg_id": message_id})
-        if doc:
-            file_size = doc.get("file_size", 0)
-            file_name = doc.get("file_name", file_name)
-            mime_type = doc.get("mime_type", mime_type)
+        raise HTTPException(status_code=404, detail="Video not found")
 
-    if file_size == 0:
-        raise HTTPException(status_code=404, detail="File not found")
+    range_h = request.headers.get("range")
+    is_dl = "/download" in request.url.path or "/dl" in request.url.path
 
-    range_header = request.headers.get("range", None)
-    is_download = request.url.path.startswith("/download")
-
-    if range_header:
-        start, end = parse_byte_range(range_header, file_size)
-        content_len = (end - start) + 1
+    if range_h:
+        s, e = parse_range(range_h, file_size)
         headers = {
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Range": f"bytes {s}-{e}/{file_size}",
             "Accept-Ranges": "bytes",
-            "Content-Length": str(content_len),
+            "Content-Length": str((e - s) + 1),
             "Content-Type": mime_type,
         }
-        if is_download:
+        if is_dl:
             headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
-
-        return StreamingResponse(
-            telegram_byte_streamer(bot, BIN_CHANNEL, message_id, start, end),
-            status_code=206,
-            headers=headers,
-            media_type=mime_type
-        )
+        return StreamingResponse(byte_streamer(bot, BIN_CHANNEL, num_id, s, e), status_code=206, headers=headers)
     else:
-        headers = {
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(file_size),
-            "Content-Type": mime_type,
-        }
-        if is_download:
+        headers = {"Accept-Ranges": "bytes", "Content-Length": str(file_size), "Content-Type": mime_type}
+        if is_dl:
             headers["Content-Disposition"] = f'attachment; filename="{file_name}"'
+        return StreamingResponse(byte_streamer(bot, BIN_CHANNEL, num_id, 0, file_size - 1), status_code=200, headers=headers)
 
-        return StreamingResponse(
-            telegram_byte_streamer(bot, BIN_CHANNEL, message_id, 0, file_size - 1),
-            status_code=200,
-            headers=headers,
-            media_type=mime_type
-        )
-
-# ==============================================================================
-# BROWSER VIDEO PLAYER
-# ==============================================================================
-@web_app.get("/watch/{message_id}", response_class=HTMLResponse)
-async def watch_player(message_id: int):
-    doc = await videos_col.find_one({"channel_msg_id": message_id})
-    file_name = doc.get("file_name", f"Video_{message_id}.mp4") if doc else f"Video_{message_id}.mp4"
-    stream_url = f"{DOMAIN}/stream/{message_id}"
-    download_url = f"{DOMAIN}/download/{message_id}"
+@web_app.get("/watch/{vid}", response_class=HTMLResponse)
+@web_app.get("/player/{vid}", response_class=HTMLResponse)
+async def watch_player_route(vid: str):
+    clean_id = vid.replace("tg-", "")
+    num_id = int(clean_id) if clean_id.isdigit() else 0
+    doc = await videos_col.find_one({
+        "$or": [{"channel_msg_id": num_id}, {"id": vid}, {"id": f"tg-{clean_id}"}]
+    })
+    file_name = doc.get("file_name", f"Video_{vid}.mp4") if doc else f"Video_{vid}.mp4"
+    duration = doc.get("duration", 120) if doc else 120
+    stream_url = f"{DOMAIN}/stream/{clean_id}"
+    download_url = f"{DOMAIN}/download/{clean_id}"
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{file_name} - SR Video Quality Player</title>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>{file_name}</title>
   <style>
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ background: #07090e; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 16px; }}
-    .container {{ width: 100%; max-width: 960px; margin: auto; }}
-    .player-wrap {{ background: #000; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.8); position: relative; border: 1px solid #1e293b; }}
-    video {{ width: 100%; max-height: 75vh; display: block; outline: none; background: #000; }}
-    .info-card {{ background: #0f172a; border: 1px solid #1e293b; border-radius: 12px; padding: 18px; margin-top: 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 14px; }}
-    .title {{ font-size: 16px; font-weight: 600; color: #f8fafc; word-break: break-all; max-width: 600px; }}
-    .btn-group {{ display: flex; gap: 10px; }}
-    .btn {{ display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 8px; font-size: 14px; font-weight: 600; text-decoration: none; cursor: pointer; transition: all 0.2s; border: none; }}
-    .btn-download {{ background: #10b981; color: #022c22; }}
-    .btn-download:hover {{ background: #34d399; }}
-    .quality-bar {{ background: #1e293b; border-radius: 8px; padding: 12px; margin-top: 14px; display: flex; gap: 10px; align-items: center; overflow-x: auto; }}
-    .q-btn {{ background: #334155; color: #f1f5f9; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 600; transition: all 0.2s; }}
-    .q-btn:hover, .q-btn.active {{ background: #3b82f6; }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }}
+    html, body {{ width: 100%; height: 100%; overflow: hidden; background: #000; color: #f1f5f9; font-family: system-ui, sans-serif; }}
+    .player-wrap {{ position: relative; width: 100vw; height: 100vh; display: flex; align-items: center; justify-content: center; background: #000; cursor: pointer; user-select: none; }}
+    video {{ width: 100%; height: 100%; object-fit: contain; background: #000; }}
+    
+    /* Double Tap Seek Visual Overlays */
+    .tap-zone {{
+      position: absolute; top: 0; bottom: 70px; width: 45%; z-index: 25;
+      display: flex; align-items: center; justify-content: center;
+      pointer-events: none; opacity: 0; transition: opacity 0.25s ease;
+    }}
+    .tap-zone.left {{ left: 0; }}
+    .tap-zone.right {{ right: 0; }}
+    .tap-zone.active {{ opacity: 1; background: rgba(255, 255, 255, 0.08); }}
+    .tap-pill {{
+      background: rgba(15, 23, 42, 0.9); border: 1px solid rgba(255, 255, 255, 0.25);
+      padding: 10px 18px; border-radius: 999px; font-size: 15px; font-weight: 700;
+      color: #10b981; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7);
+    }}
+
+    .badge {{ position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) scale(0.6); width: 76px; height: 76px; border-radius: 50%; background: rgba(15, 23, 42, 0.85); border: 2px solid rgba(255, 255, 255, 0.25); display: flex; align-items: center; justify-content: center; font-size: 34px; color: #fff; pointer-events: none; opacity: 0; transition: all 0.25s ease; z-index: 30; }}
+    .badge.flash {{ opacity: 1; transform: translate(-50%, -50%) scale(1); }}
+    .controls {{ position: absolute; left: 0; right: 0; bottom: 0; z-index: 40; padding: 24px 16px 14px; background: linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.6) 65%, transparent 100%); display: flex; flex-direction: column; gap: 8px; cursor: default; }}
+    .seek {{ width: 100%; accent-color: #10b981; cursor: pointer; height: 7px; border-radius: 999px; -webkit-appearance: none; background: rgba(255, 255, 255, 0.25); }}
+    .seek::-webkit-slider-thumb {{ -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #10b981; cursor: pointer; }}
+    .row {{ display: flex; align-items: center; justify-content: space-between; }}
+    .left {{ display: flex; align-items: center; gap: 12px; }}
+    .btn {{ background: rgba(255, 255, 255, 0.15); border: 1px solid rgba(255, 255, 255, 0.2); color: #fff; border-radius: 8px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }}
+    .btn:hover {{ background: rgba(255, 255, 255, 0.25); }}
+    .time {{ font-size: 13px; font-weight: 600; color: #94a3b8; }}
+    .dl-btn {{ background: #10b981; color: #022c22; text-decoration: none; padding: 6px 14px; border-radius: 8px; font-size: 13px; font-weight: 700; }}
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="player-wrap">
-      <video id="player" controls playsinline preload="metadata" controlsList="nodownload">
-        <source src="{stream_url}" type="video/mp4">
-        Your browser does not support HTML5 video.
-      </video>
-    </div>
+  <div class="player-wrap" id="wrap">
+    <!-- Double Tap Indicators -->
+    <div class="tap-zone left" id="zone-left"><div class="tap-pill">⏪ 10s</div></div>
+    <div class="tap-zone right" id="zone-right"><div class="tap-pill">10s ⏩</div></div>
 
-    <div class="quality-bar">
-      <span style="font-size: 13px; color: #94a3b8; font-weight: 600;">Quality:</span>
-      <a href="{stream_url}?q=1080" class="q-btn active">1080p FHD</a>
-      <a href="{stream_url}?q=720" class="q-btn">720p HD</a>
-      <a href="{stream_url}?q=480" class="q-btn">480p SD</a>
-      <a href="{stream_url}?q=360" class="q-btn">360p Low</a>
-    </div>
-
-    <div class="info-card">
-      <div class="title"><i class="fa-solid fa-film" style="color: #3b82f6; margin-right: 8px;"></i>{file_name}</div>
-      <div class="btn-group">
-        <a href="{download_url}" class="btn btn-download"><i class="fa-solid fa-download"></i> Fast Download</a>
+    <div class="badge" id="badge">▶️</div>
+    <video id="v" playsinline webkit-playsinline preload="auto" src="{stream_url}"></video>
+    
+    <div class="controls" id="ctrls" onclick="event.stopPropagation()">
+      <input type="range" class="seek" id="seek" min="0" max="{duration}" step="1" value="0">
+      <div class="row">
+        <div class="left">
+          <button type="button" class="btn" id="playBtn" onclick="togglePlay()">▶️ Play</button>
+          <span class="time" id="time">0:00 / 0:00</span>
+        </div>
+        <div class="left">
+          <a href="{download_url}" class="dl-btn">⬇️ Download</a>
+          <button type="button" class="btn" onclick="toggleFull()">⛶ Fullscreen</button>
+        </div>
       </div>
     </div>
   </div>
+  <script>
+    const v = document.getElementById('v'), wrap = document.getElementById('wrap');
+    const seek = document.getElementById('seek'), time = document.getElementById('time');
+    const badge = document.getElementById('badge'), playBtn = document.getElementById('playBtn');
+    const zoneLeft = document.getElementById('zone-left'), zoneRight = document.getElementById('zone-right');
+    let totalDur = {duration}, isScrubbing = false, timer = null;
+    let lastTapTime = 0, lastTapX = 0, tapTimeout = null;
+
+    function fmt(s) {{ s = Math.max(0, Math.floor(s || 0)); const m = Math.floor(s / 60), r = s % 60; return m + ':' + (r < 10 ? '0' : '') + r; }}
+    function flash(icon) {{ badge.textContent = icon; badge.classList.add('flash'); if (timer) clearTimeout(timer); timer = setTimeout(() => badge.classList.remove('flash'), 500); }}
+
+    function togglePlay() {{
+      if (v.paused) {{ v.play().catch(() => {{}}); flash('▶️'); playBtn.textContent = '⏸️ Pause'; }}
+      else {{ v.pause(); flash('⏸️'); playBtn.textContent = '▶️ Play'; }}
+    }}
+
+    function showZoneEffect(side) {{
+      const el = side === 'left' ? zoneLeft : zoneRight;
+      el.classList.add('active');
+      setTimeout(() => el.classList.remove('active'), 450);
+    }}
+
+    function seekBy(d) {{
+      v.currentTime = Math.max(0, Math.min(totalDur, (v.currentTime || 0) + d));
+    }}
+
+    // SMART TOUCH GESTURE: Double Tap Left = -10s, Double Tap Right = +10s, Single Tap = Play/Pause
+    wrap.addEventListener('click', function(e) {{
+      if (e.target.closest('#ctrls')) return;
+      const rect = wrap.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const width = rect.width;
+      const now = Date.now();
+      const diff = now - lastTapTime;
+
+      if (diff < 320 && Math.abs(clickX - lastTapX) < width * 0.35) {{
+        if (tapTimeout) {{ clearTimeout(tapTimeout); tapTimeout = null; }}
+        if (clickX > width * 0.55) {{
+          seekBy(10);
+          showZoneEffect('right');
+        }} else if (clickX < width * 0.45) {{
+          seekBy(-10);
+          showZoneEffect('left');
+        }} else {{
+          togglePlay();
+        }}
+        lastTapTime = 0;
+      }} else {{
+        lastTapTime = now;
+        lastTapX = clickX;
+        if (tapTimeout) clearTimeout(tapTimeout);
+        tapTimeout = setTimeout(() => {{
+          togglePlay();
+          tapTimeout = null;
+        }}, 280);
+      }}
+    }});
+
+    function toggleFull() {{ if (!document.fullscreenElement) wrap.requestFullscreen().catch(() => {{}}); else document.exitFullscreen().catch(() => {{}}); }}
+
+    v.addEventListener('loadedmetadata', function() {{ if (v.duration && isFinite(v.duration)) {{ totalDur = Math.floor(v.duration); seek.max = String(totalDur); }} }});
+    v.addEventListener('timeupdate', function() {{ if (!isScrubbing) {{ const cur = v.currentTime || 0; seek.value = String(Math.floor(cur)); time.textContent = fmt(cur) + ' / ' + fmt(totalDur); }} }});
+    seek.addEventListener('input', function() {{ isScrubbing = true; time.textContent = fmt(Number(seek.value)) + ' / ' + fmt(totalDur); }});
+    seek.addEventListener('change', function() {{ isScrubbing = false; v.currentTime = Number(seek.value); }});
+  </script>
 </body>
 </html>
 """
     return HTMLResponse(content=html)
 
 # ==============================================================================
-# MAIN APPLICATION RUNNER (HYDROGRAM + FASTAPI)
+# MAIN STARTER
 # ==============================================================================
-async def main():
-    logger.info("Starting SR-VIDEO-QUALITY Telegram Bot...")
-    await bot.start()
-    bot_info = await bot.get_me()
-    logger.info(f"Bot authenticated as @{bot_info.username} (ID: {bot_info.id})")
-
-    # Start Keep-Alive task
+async def start_all():
+    logger.info("Initializing Bot & Server...")
     asyncio.create_task(keep_alive_ping())
 
-    # Start Uvicorn Server
+    if BOT_TOKEN:
+        try:
+            await bot.start()
+            me = await bot.get_me()
+            logger.info(f"Bot connected as @{me.username} (ID: {me.id}) | Root Admin: 8056243176")
+        except Exception as b_err:
+            logger.error(f"Bot start error: {b_err}")
+
     config = uvicorn.Config(web_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(config)
-    logger.info(f"Web Server starting on port {PORT} with Domain: {DOMAIN}")
     await server.serve()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start_all())
