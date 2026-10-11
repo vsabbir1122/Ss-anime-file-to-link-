@@ -1,7 +1,31 @@
 services:
   - type: web
-    name: ssanime-stream-server
+    name: sr-video-quality
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     plan: free
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python main.py
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.12
+      - key: PORT
+        value: 8080
+      - key: DOMAIN
+        value: https://ss-anime-file-to-link.onrender.com
+      - key: MONGO_URI
+        value: "url"
+      - key: API_ID
+        value: "29608422"
+      - key: API_HASH
+        value: "3db2f8e109301f02f5d9c8f10dd79244"
+      - key: BOT_TOKEN
+        value: "CONFIGURED_IN_SERVER_ENV"
+      - key: BIN_CHANNEL
+        value: "-1004450462812"
+      - key: CHANNEL_USERNAME
+        value: "ssanimebd"
+      - key: ADMINS
+        value: "8056243176"
+      - key: MIN_FILE_SIZE_MB
+        value: "5"
