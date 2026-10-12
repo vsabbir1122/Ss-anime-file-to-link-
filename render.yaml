@@ -23,9 +23,7 @@ services:
         value: "CONFIGURED_IN_SERVER_ENV"
       - key: BIN_CHANNEL
         value: "-1004450462812"
-      - key: CHANNEL_USERNAME
-        value: "ssanimebd"
       - key: ADMINS
         value: "8056243176"
       - key: MIN_FILE_SIZE_MB
-        value: "5"
+        value: "10"
