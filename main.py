@@ -78,6 +78,36 @@ async def get_min_file_size_mb() -> float:
         pass
     return MIN_FILE_SIZE_MB
 
+async def get_bin_channel() -> int:
+    try:
+        doc = await settings_col.find_one({"key": "bin_channel"})
+        if doc and "val" in doc:
+            return int(doc["val"])
+    except Exception:
+        pass
+    return BIN_CHANNEL
+
+async def get_channel_username() -> str:
+    try:
+        doc = await settings_col.find_one({"key": "channel_username"})
+        if doc and "val" in doc:
+            return str(doc["val"]).lstrip("@")
+    except Exception:
+        pass
+    return CHANNEL_USERNAME
+
+def normalize_channel_id(raw: str) -> int:
+    import re
+    clean = re.sub(r"[^d-]", "", str(raw).strip())
+    if not clean:
+        return 0
+    val = int(clean)
+    if val > 0:
+        val = -int(f"100{val}") if not str(val).startswith("100") else -val
+    elif val < 0 and not str(val).startswith("-100"):
+        val = -int(f"100{abs(val)}")
+    return val
+
 async def check_is_admin(user_id: int) -> bool:
     if not ADMINS:
         return True
@@ -149,23 +179,77 @@ async def start_handler(client: Client, message: Message):
         return
 
     min_size_val = await get_min_file_size_mb()
+    cur_bin = await get_bin_channel()
+    cur_ch = await get_channel_username()
     await message.reply_text(
-        "👋 **SR-VIDEO-QUALITY Bot Online (0GB Bandwidth Mode Ready)!**\n\n"
-        "Send or forward any Video / MKV / MP4 file to me and I will generate:\n"
+        "👋 **SR-VIDEO-QUALITY Bot Online (0GB Bandwidth & Bin Channel Engine)!**\n\n"
+        "বটে যে কোনো ভিডিও পাঠালে তা **স্বয়ংক্রিয়ভাবে আপনার Bin Channel-এ কপি হবে** এবং স্ট্রিমিং ও Lovable লিংক দিবে:\n"
         "⚡ **Telegram Native Embed (0 Server Bandwidth - কখনো লিমিট শেষ হবে না)**\n"
         "🎬 **Web Player & Multi-Quality Stream (1080p, 720p, 480p)**\n"
         "📥 **Fast Direct Download Link**\n\n"
         f"🌐 **Active Domain:** `{DOMAIN}`\n"
-        f"📢 **Public Channel:** `@{CHANNEL_USERNAME}`\n"
+        f"📦 **Bin Channel ID:** `{cur_bin}`\n"
+        f"📢 **Public Channel:** `@{cur_ch}`\n"
         f"👑 **Admin Status:** Authorized (`{user_id}`)\n"
         f"📦 **ন্যূনতম সাইজ সীমা:** `{min_size_val} MB`\n\n"
         "🛠 **কমান্ড সমূহ:**\n"
+        "📦 `/setbin <channel_id>` - বিন চ্যানেল সেট করুন\n"
+        "🔍 `/bin` - বর্তমান বিন চ্যানেল দেখুন\n"
+        "📢 `/setchannel <username>` - পাবলিক চ্যানেল ইউজারনেম সেট করুন\n"
+        "🔗 `/convert <link>` - যে কোনো টেলিগ্রাম বা স্ট্রিম লিংক রূপান্তর করুন\n"
         "➕ `/addadmin <user_id>` - নতুন অ্যাডমিন যুক্ত করুন\n"
         "➖ `/deladmin <user_id>` - অ্যাডমিন বাতিল করুন\n"
         "📋 `/admins` - সকল অ্যাডমিন তালিকা দেখুন\n"
         "📏 `/minsize` - বর্তমান সাইজ লিমিট দেখুন\n"
-        "⚙️ `/setmin <MB>` - সাইজ লিমিট পরিবর্তন করুন\n"
-        "📢 `/setchannel <username>` - পাবলিক চ্যানেল সেট করুন"
+        "⚙️ `/setmin <MB>` - সাইজ লিমিট পরিবর্তন করুন"
+    )
+
+@bot.on_message(filters.command(["setbin", "binchannel"]) & filters.private)
+async def set_bin_channel_handler(client: Client, message: Message):
+    if not message.from_user or not await check_is_admin(message.from_user.id):
+        await message.reply_text("⛔ শুধুমাত্র অ্যাডমিনরা Bin Channel সেট করতে পারেন।")
+        return
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        cur_bin = await get_bin_channel()
+        await message.reply_text(
+            f"📦 **বর্তমান Bin Channel ID:** `{cur_bin}`\n\n"
+            "পরিবর্তন করতে লিখুন:\n"
+            "`/setbin -1004450462812`\n\n"
+            "💡 অথবা আপনার Bin Channel থেকে যেকোনো পোস্ট এই বটে ফরোয়ার্ড করুন।"
+        )
+        return
+    norm_id = normalize_channel_id(parts[1])
+    if not norm_id:
+        await message.reply_text("❌ সঠিক চ্যানেল আইডি লিখুন (যেমন: `/setbin -1004450462812`)")
+        return
+    global BIN_CHANNEL
+    BIN_CHANNEL = norm_id
+    await settings_col.update_one(
+        {"key": "bin_channel"},
+        {"$set": {"val": norm_id, "updated_at": datetime.utcnow().isoformat()}},
+        upsert=True
+    )
+    ch_title = "Unknown"
+    try:
+        chat_info = await bot.get_chat(norm_id)
+        ch_title = chat_info.title or "Channel"
+    except Exception as exc:
+        ch_title = f"(সতর্কতা: বটটি এই চ্যানেলে অ্যাডমিন কিনা নিশ্চিত করুন: {exc})"
+
+    await message.reply_text(
+        f"✅ **Bin Channel সফলভাবে আপডেট করা হয়েছে!**\n\n"
+        f"📢 **চ্যানেল:** `{ch_title}`\n"
+        f"🆔 **ID:** `{norm_id}`\n\n"
+        f"এখন থেকে বটে পাঠানো যেকোনো ভিডিও অটো এই চ্যানেলে যাবে এবং সেখান থেকে লিংক জেনারেট হবে!"
+    )
+
+@bot.on_message(filters.command(["bin", "getbin"]) & filters.private)
+async def get_bin_channel_handler(client: Client, message: Message):
+    cur_bin = await get_bin_channel()
+    await message.reply_text(
+        f"📦 **বর্তমান Bin Channel ID:** `{cur_bin}`\n\n"
+        "নতুন আইডি সেট করতে: `/setbin -1004450462812`"
     )
 
 @bot.on_message(filters.command(["setchannel", "channel"]) & filters.private)
@@ -175,7 +259,8 @@ async def set_channel_handler(client: Client, message: Message):
         return
     parts = message.text.strip().split()
     if len(parts) < 2:
-        await message.reply_text(f"ব্যবহার: `/setchannel ssanimebd`\nবর্তমান চ্যানেল: `@{CHANNEL_USERNAME}`")
+        cur_ch = await get_channel_username()
+        await message.reply_text(f"ব্যবহার: `/setchannel ssanimebd`\nবর্তমান চ্যানেল: `@{cur_ch}`")
         return
     new_ch = parts[1].strip().lstrip("@")
     global CHANNEL_USERNAME
@@ -447,16 +532,21 @@ async def media_handler(client: Client, message: Message):
     except Exception:
         return
 
+    target_bin = await get_bin_channel()
     bin_msg_id = None
-    try:
-        if BIN_CHANNEL and BIN_CHANNEL != -1001234567890:
-            log_msg = await message.copy(chat_id=BIN_CHANNEL)
+    copy_err_text = None
+    if target_bin:
+        try:
+            log_msg = await message.copy(chat_id=target_bin)
             bin_msg_id = log_msg.id
-    except FloodWait as fw:
-        logger.warning(f"FloodWait on BIN_CHANNEL copy: {fw.value}s")
-        bin_msg_id = None
-    except Exception as copy_err:
-        logger.warning(f"BIN_CHANNEL copy skipped: {copy_err}")
+            logger.info(f"Successfully copied media to BIN_CHANNEL {target_bin} with msg #{bin_msg_id}")
+        except FloodWait as fw:
+            logger.warning(f"FloodWait on BIN_CHANNEL copy: {fw.value}s")
+            bin_msg_id = None
+            copy_err_text = f"FloodWait ({fw.value}s)"
+        except Exception as copy_err:
+            copy_err_text = str(copy_err)
+            logger.warning(f"BIN_CHANNEL copy error: {copy_err}")
 
     stream_id = f"tg-{bin_msg_id or message.id}"
     file_name = getattr(media, "file_name", None) or f"SR_Video_{stream_id}.mp4"
@@ -466,27 +556,22 @@ async def media_handler(client: Client, message: Message):
         mime_type = "video/mp4"
     file_size_mb = round(file_size / (1024 * 1024), 2)
 
-    # 0-Bandwidth Telegram Embed URL calculation
+    effective_channel = await get_channel_username()
+
     tg_embed_url = ""
     tg_post_url = ""
-    effective_channel = CHANNEL_USERNAME
-    if not effective_channel:
-        try:
-            ch_doc = await settings_col.find_one({"key": "channel_username"})
-            if ch_doc and "val" in ch_doc:
-                effective_channel = str(ch_doc["val"]).lstrip("@")
-        except Exception:
-            pass
-
     if effective_channel and bin_msg_id:
         tg_embed_url = f"https://t.me/{effective_channel}/{bin_msg_id}?embed=1"
         tg_post_url = f"https://t.me/{effective_channel}/{bin_msg_id}"
+    elif bin_msg_id and target_bin:
+        clean_bin_num = str(target_bin).replace("-100", "").replace("-", "")
+        tg_post_url = f"https://t.me/c/{clean_bin_num}/{bin_msg_id}"
 
     doc = {
         "id": stream_id,
         "msg_id": message.id,
         "chat_id": message.chat.id,
-        "bin_channel": BIN_CHANNEL if bin_msg_id else None,
+        "bin_channel": target_bin if bin_msg_id else None,
         "bin_msg_id": bin_msg_id,
         "channel_username": effective_channel,
         "telegramEmbedUrl": tg_embed_url,
@@ -509,7 +594,11 @@ async def media_handler(client: Client, message: Message):
     if tg_embed_url:
         button_rows.append([
             InlineKeyboardButton("⚡ Telegram Embed (0GB Bandwidth)", url=tg_embed_url),
-            InlineKeyboardButton("📱 Telegram Post", url=tg_post_url)
+            InlineKeyboardButton("📱 Telegram Channel Post", url=tg_post_url)
+        ])
+    elif tg_post_url:
+        button_rows.append([
+            InlineKeyboardButton("📦 Bin Channel Post", url=tg_post_url)
         ])
 
     button_rows.extend([
@@ -535,9 +624,21 @@ async def media_handler(client: Client, message: Message):
 
     buttons = InlineKeyboardMarkup(button_rows)
 
+    bin_status_banner = ""
+    if bin_msg_id:
+        bin_status_banner = f"✅ **স্বয়ংক্রিয়ভাবে আপনার Bin Channel-এ ভিডিও পাঠানো হয়েছে!**\n📦 **Bin Msg ID:** `#{bin_msg_id}`\n\n"
+    elif copy_err_text:
+        bin_status_banner = (
+            f"⚠️ **সতর্কতা: ভিডিওটি Bin Channel (`{target_bin}`) এ কপি করা যায়নি!**\n"
+            f"কারণ: `{copy_err_text}`\n"
+            "👉 দয়া করে নিশ্চিত করুন বটটি আপনার Bin Channel-এ **Administrator** হিসেবে যুক্ত আছে এবং **'Post Messages'** পারমিশন দেওয়া আছে।\n"
+            "সঠিক চ্যানেল আইডি সেট করতে লিখুন: `/setbin <channel_id>`\n\n"
+        )
+
     reply_text_body = (
         f"🎬 **{doc['title']}**\n"
         f"📦 **Size:** `{file_size_mb} MB`\n\n"
+        + bin_status_banner +
         f"🌐 **Lovable-এ বসানোর লিংক (সরাসরি পেস্ট করলেই চলবে):**\n"
         f"`{watch_url}`\n\n"
         f"⚡ **সুবিধা:** এই লিংকটি ওয়েবসাইটে বসালে স্বয়ংক্রিয়ভাবে টেলিগ্রাম থেকে ০ ব্যান্ডউইথে চলবে (আপনার হোস্টিংয়ের ৫ জিবি লিমিট একটুও কাটবে না!)\n\n"
@@ -566,6 +667,108 @@ async def media_handler(client: Client, message: Message):
         except Exception as send_err:
             logger.error(f"Error sending reply: {send_err}")
             await asyncio.sleep(1)
+
+# ==============================================================================
+# CHANNEL POST HANDLER (সরাসরি BIN CHANNEL-এ ভিডিও পোস্ট করলে অটো ক্যাপচার)
+# ==============================================================================
+@bot.on_message(filters.channel & (filters.video | filters.document | filters.animation))
+async def channel_media_handler(client: Client, message: Message):
+    media = message.video or message.document or message.animation
+    if not media:
+        return
+
+    bin_msg_id = message.id
+    stream_id = f"tg-{bin_msg_id}"
+    file_name = getattr(media, "file_name", None) or f"SR_Video_{stream_id}.mp4"
+    file_size = getattr(media, "file_size", 0) or 0
+    file_size_mb = round(file_size / (1024 * 1024), 2)
+    mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
+
+    effective_channel = await get_channel_username() or (message.chat.username or "").lstrip("@")
+    tg_embed_url = f"https://t.me/{effective_channel}/{bin_msg_id}?embed=1" if effective_channel else ""
+    tg_post_url = f"https://t.me/{effective_channel}/{bin_msg_id}" if effective_channel else f"https://t.me/c/{str(message.chat.id).replace('-100', '')}/{bin_msg_id}"
+
+    doc = {
+        "id": stream_id,
+        "msg_id": message.id,
+        "chat_id": message.chat.id,
+        "bin_channel": message.chat.id,
+        "bin_msg_id": bin_msg_id,
+        "channel_username": effective_channel,
+        "telegramEmbedUrl": tg_embed_url,
+        "telegramFileId": media.file_id,
+        "fileUniqueId": getattr(media, "file_unique_id", ""),
+        "title": file_name.rsplit(".", 1)[0].replace("_", " "),
+        "fileName": file_name,
+        "sizeBytes": file_size,
+        "mimeType": mime_type,
+        "durationSec": getattr(media, "duration", 120) or 120,
+        "sourceType": "telegram",
+        "createdAt": datetime.utcnow().isoformat(),
+    }
+    await videos_col.update_one({"id": stream_id}, {"$set": doc}, upsert=True)
+
+    watch_url = f"{DOMAIN}/player/{stream_id}"
+    dl_url = f"{DOMAIN}/dl/{stream_id}"
+
+    logger.info(f"Channel video indexed from {message.chat.id} as msg #{bin_msg_id}: {doc['title']}")
+
+    admin_notify = (
+        f"🎬 **আপনার Bin Channel থেকে নতুন ভিডিও প্রসেস সম্পন্ন!**\n\n"
+        f"📌 **শিরোনাম:** `{doc['title']}`\n"
+        f"📦 **সাইজ:** `{file_size_mb} MB`\n"
+        f"🆔 **Bin Msg ID:** `#{bin_msg_id}`\n\n"
+        f"🌐 **Lovable-এ বসানোর লিংক:**\n"
+        f"`{watch_url}`\n\n"
+        f"📋 **রেডি Lovable Iframe কোড:**\n"
+        f"`<iframe src=\"{watch_url}\" width=\"100%\" height=\"450\" frameborder=\"0\" allowfullscreen allow=\"autoplay; fullscreen\"></iframe>`\n\n"
+        + (f"⚡ **Telegram 0-Bandwidth Embed:**\n<{tg_embed_url}>\n\n" if tg_embed_url else "")
+        + f"📥 **Download:**\n<{dl_url}>\n\n"
+        f"✅ ভিডিওটি স্বয়ংক্রিয়ভাবে ০-ব্যান্ডউইথ স্ট্রিমিংয়ের জন্য প্রস্তুত!"
+    )
+
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎬 Watch Player", url=watch_url), InlineKeyboardButton("📥 Direct Download", url=dl_url)],
+        [InlineKeyboardButton("📱 Channel Post", url=tg_post_url)]
+    ])
+
+    for admin_id in ADMINS:
+        try:
+            await bot.send_message(admin_id, admin_notify, reply_markup=markup, disable_web_page_preview=True)
+        except Exception:
+            pass
+
+# ==============================================================================
+# FORWARDED MESSAGE HANDLER (চ্যানেল থেকে মেসেজ ফরোয়ার্ড করলে অটো সেট করবে)
+# ==============================================================================
+@bot.on_message(filters.private & filters.forwarded)
+async def forwarded_channel_post_detector(client: Client, message: Message):
+    user_id = message.from_user.id if message.from_user else 0
+    if not await check_is_admin(user_id):
+        return
+    fw_chat = message.forward_from_chat
+    if fw_chat and fw_chat.type in ("channel", "supergroup"):
+        fw_id = fw_chat.id
+        fw_title = fw_chat.title or "Channel"
+        fw_username = (fw_chat.username or "").lstrip("@")
+        fw_msg_id = message.forward_from_message_id
+
+        btns = [
+            [InlineKeyboardButton("✅ সেট করুন Bin Channel হিসেবে", callback_data=f"set_bin:{fw_id}")]
+        ]
+        if fw_username:
+            btns.append([InlineKeyboardButton(f"📢 সেট করুন @{fw_username} পাবলিক চ্যানেল", callback_data=f"set_ch:{fw_username}")])
+
+        await message.reply_text(
+            f"📢 **ফরোয়ার্ড করা চ্যানেল শনাক্ত হয়েছে!**\n\n"
+            f"📌 **নাম:** {fw_title}\n"
+            f"🆔 **চ্যানেল আইডি:** `{fw_id}`\n"
+            + (f"🌐 **ইউজারনেম:** `@{fw_username}`\n" if fw_username else "")
+            + (f"🔢 **মেসেজ আইডি:** `#{fw_msg_id}`\n\n" if fw_msg_id else "\n")
+            + "👉 এটিকে আপনার **Bin Channel** হিসেবে সেট করতে নিচের বাটনে চাপুন অথবা লিখুন:\n"
+            f"`/setbin {fw_id}`",
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
 
 @bot.on_callback_query()
 async def quality_callback_handler(client: Client, callback_query):
@@ -620,6 +823,32 @@ async def quality_callback_handler(client: Client, callback_query):
                     InlineKeyboardButton("⚙️ Download Quality Menu", callback_data=f"q_dl:{stream_id}")
                 ]
             ])
+        )
+    elif data.startswith("set_bin:"):
+        chan_id = int(data.replace("set_bin:", ""))
+        global BIN_CHANNEL
+        BIN_CHANNEL = chan_id
+        await settings_col.update_one(
+            {"key": "bin_channel"},
+            {"$set": {"val": chan_id, "updated_at": datetime.utcnow().isoformat()}},
+            upsert=True
+        )
+        await callback_query.answer("✅ Bin Channel সফলভাবে সেট করা হয়েছে!", show_alert=True)
+        await callback_query.message.edit_text(
+            f"✅ **Bin Channel সফলভাবে সেট করা হয়েছে!**\n🆔 আইডি: `{chan_id}`\n\nএখন থেকে ভিডিও আপলোড করলে অটো এই চ্যানেলে যাবে এবং সেখান থেকে লিংক দিবে।"
+        )
+    elif data.startswith("set_ch:"):
+        ch_user = data.replace("set_ch:", "").lstrip("@")
+        global CHANNEL_USERNAME
+        CHANNEL_USERNAME = ch_user
+        await settings_col.update_one(
+            {"key": "channel_username"},
+            {"$set": {"val": ch_user, "updated_at": datetime.utcnow().isoformat()}},
+            upsert=True
+        )
+        await callback_query.answer(f"✅ পাবলিক চ্যানেল @{ch_user} সেট করা হয়েছে!", show_alert=True)
+        await callback_query.message.edit_text(
+            f"✅ **পাবলিক চ্যানেল আপডেট সফল:** `@{ch_user}`\nএখন সকল ভিডিওতে 0-Bandwidth Telegram Embed লিংক চালু থাকবে!"
         )
 
 # ==============================================================================
@@ -862,11 +1091,15 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
 
     if not media_target or file_size <= 0:
         try:
-            if doc and doc.get("chat_id") and doc.get("msg_id"):
+            target_bin = int((doc or {}).get("bin_channel") or await get_bin_channel())
+            bin_msg = int((doc or {}).get("bin_msg_id") or 0)
+            if bin_msg > 0:
+                msg = await bot.get_messages(target_bin, bin_msg)
+            elif doc and doc.get("chat_id") and doc.get("msg_id"):
                 msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
             else:
                 numeric_id = int(stream_id.replace("tg-", ""))
-                msg = await bot.get_messages(BIN_CHANNEL, numeric_id)
+                msg = await bot.get_messages(target_bin, numeric_id)
             media = msg.video or msg.document or msg.animation
             if not media:
                 raise HTTPException(status_code=404, detail="Media not found")
@@ -931,13 +1164,14 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
                     yield chunk
                 current_part += 1
         except Exception:
+            target_bin = int((doc or {}).get("bin_channel") or await get_bin_channel())
             if doc and doc.get("bin_msg_id"):
-                fresh_msg = await bot.get_messages(BIN_CHANNEL, int(doc["bin_msg_id"]))
+                fresh_msg = await bot.get_messages(target_bin, int(doc["bin_msg_id"]))
             elif doc and doc.get("chat_id") and doc.get("msg_id"):
                 fresh_msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
             else:
                 numeric_id = int(stream_id.replace("tg-", ""))
-                fresh_msg = await bot.get_messages(BIN_CHANNEL, numeric_id)
+                fresh_msg = await bot.get_messages(target_bin, numeric_id)
             fresh_media = fresh_msg.video or fresh_msg.document or fresh_msg.animation
             if fresh_media and getattr(fresh_media, "file_id", None):
                 await videos_col.update_one({"id": stream_id}, {"$set": {"telegramFileId": fresh_media.file_id}})
