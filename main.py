@@ -353,7 +353,7 @@ async def get_min_size_handler(client: Client, message: Message):
     )
 
 
-@bot.on_message(filters.private & (filters.video | filters.document | filters.animation))
+@bot.on_message((filters.private | filters.group) & (filters.video | filters.document | filters.animation))
 async def media_handler(client: Client, message: Message):
     media = message.video or message.document or message.animation
     if not media:
@@ -379,8 +379,8 @@ async def media_handler(client: Client, message: Message):
     file_size_mb = round(file_size / (1024 * 1024), 2)
     min_size_limit = await get_min_file_size_mb()
 
-    # 10 MB MINIMUM FILE SIZE RESTRICTION (১০ এমবির কম ফাইল গৃহীত হবে না)
-    if file_size < int(min_size_limit * 1024 * 1024):
+    # MINIMUM FILE SIZE CHECK (Only if min_size_limit > 0)
+    if min_size_limit > 0 and file_size < int(min_size_limit * 1024 * 1024):
         await message.reply_text(
             f"⚠️ **ফাইল সাইজ খুবই ছোট!**\n\n"
             f"📦 আপনার পাঠানো ফাইল: `{file_size_mb} MB`\n"
@@ -673,24 +673,26 @@ async def watch_video(stream_id: str, q: str = ""):
       width:100%; height:100%; object-fit:contain;
       display:block; background:#000;
     }}
-    .center-action-btn {{
-      position:absolute; top:50%; left:50%; transform:translate(-50%,-50%) scale(1);
-      width:64px; height:64px; border-radius:50%;
-      background:rgba(15,23,42,0.88); border:2px solid rgba(255,255,255,0.38);
-      display:flex; align-items:center; justify-content:center; font-size:26px;
-      color:#fff; cursor:pointer; opacity:1;
-      transition:opacity 0.25s ease, transform 0.2s cubic-bezier(0.4,0,0.2,1);
-      z-index:35; box-shadow:0 8px 30px rgba(0,0,0,0.8);
-      backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+    .gesture-hud {{
+      position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+      background:rgba(9,13,22,0.92); border:1px solid rgba(255,255,255,0.22);
+      border-radius:14px; padding:14px 22px; min-width:165px;
+      display:flex; flex-direction:column; align-items:center; gap:8px;
+      pointer-events:none; opacity:0; transition:opacity 0.18s ease;
+      z-index:45; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+      box-shadow:0 12px 35px rgba(0,0,0,0.85);
     }}
-    .center-action-btn:hover {{
-      background:rgba(15,23,42,0.95); border-color:#10b981; transform:translate(-50%,-50%) scale(1.06);
+    .gesture-hud.visible {{
+      opacity:1;
     }}
-    .center-action-btn:active {{
-      transform:translate(-50%,-50%) scale(0.92);
+    .gesture-icon-row {{
+      display:flex; align-items:center; gap:8px; font-size:15px; font-weight:700; color:#f8fafc;
     }}
-    .center-action-btn.ctrl-hidden {{
-      opacity:0; pointer-events:none; transform:translate(-50%,-50%) scale(0.7);
+    .gesture-bar-bg {{
+      width:130px; height:6px; background:rgba(255,255,255,0.20); border-radius:999px; overflow:hidden;
+    }}
+    .gesture-bar-fill {{
+      height:100%; width:100%; background:#10b981; border-radius:999px; transition:width 0.05s linear;
     }}
     .quality-pill {{
       position:absolute; top:10px; right:10px; z-index:30;
@@ -704,7 +706,7 @@ async def watch_video(stream_id: str, q: str = ""):
       opacity:0; pointer-events:none;
     }}
     .tap-overlay {{
-      position:absolute; top:0; bottom:40px; width:45%; z-index:25;
+      position:absolute; top:0; bottom:55px; width:45%; z-index:25;
       display:flex; align-items:center; justify-content:center;
       pointer-events:none; opacity:0; transition:opacity 0.25s ease;
     }}
@@ -848,7 +850,7 @@ async def watch_video(stream_id: str, q: str = ""):
     <div class="player-card">
       <!-- Photo 3 Style: Compact 16:9 Player Box in Center -->
       <div class="video-box" id="video-box">
-        <!-- Quality Selector Pill (Photo 3 Style at top right inside video) -->
+        <!-- Quality Selector Pill (Top right inside video) -->
         <button type="button" class="quality-pill" onclick="event.stopPropagation(); document.getElementById('q-modal').classList.remove('hidden')">
           <span id="ql">{initial_q}</span> ⚙️
         </button>
@@ -861,12 +863,18 @@ async def watch_video(stream_id: str, q: str = ""):
           <div class="tap-badge">10s ⏩</div>
         </div>
 
-        <!-- Central Action Button: অফ করার বাটন (Pause) / অন করার বাটন (Play) -->
-        <button type="button" id="center-play-btn" class="center-action-btn" aria-label="Play or Pause">
-          <span id="center-btn-icon">▶️</span>
-        </button>
+        <!-- Gesture HUD Overlay (Brightness & Sound) -->
+        <div id="gesture-hud" class="gesture-hud">
+          <div class="gesture-icon-row">
+            <span id="hud-icon">🔊</span>
+            <span id="hud-label">Sound 100%</span>
+          </div>
+          <div class="gesture-bar-bg">
+            <div id="hud-fill" class="gesture-bar-fill"></div>
+          </div>
+        </div>
 
-        <!-- Compact 16:9 Video with native sleek controls (Photo 3 Style) -->
+        <!-- Clean 16:9 Video Player (Photo 3 Style - No permanent center button blocking video) -->
         <video
           id="v"
           playsinline
@@ -935,76 +943,56 @@ async def watch_video(stream_id: str, q: str = ""):
 
     const v = document.getElementById('v');
     const box = document.getElementById('video-box');
-    const centerBtn = document.getElementById('center-play-btn');
-    const centerIcon = document.getElementById('center-btn-icon');
     const qualityPill = document.querySelector('.quality-pill');
-
-    let controlsVisible = true;
-    let autoHideTimer = null;
-
-    function resetAutoHide() {{
-      if (autoHideTimer) clearTimeout(autoHideTimer);
-      if (!v.paused && controlsVisible) {{
-        autoHideTimer = setTimeout(() => {{
-          hideControls();
-        }}, 2600);
-      }}
-    }}
-
-    function showControls() {{
-      controlsVisible = true;
-      centerBtn.classList.remove('ctrl-hidden');
-      if (qualityPill) qualityPill.classList.remove('ctrl-hidden');
-      resetAutoHide();
-    }}
-
-    function hideControls() {{
-      if (!v.paused) {{
-        controlsVisible = false;
-        centerBtn.classList.add('ctrl-hidden');
-      }}
-    }}
-
-    function toggleControls() {{
-      if (controlsVisible && !v.paused) {{
-        hideControls();
-      }} else {{
-        showControls();
-      }}
-    }}
-
-    function syncPlayState(isPlaying) {{
-      if (isPlaying) {{
-        centerIcon.textContent = '⏸️';
-        resetAutoHide();
-      }} else {{
-        centerIcon.textContent = '▶️';
-        showControls();
-      }}
-    }}
-
-    function togglePlay() {{
-      if (v.paused) {{
-        v.play().then(() => {{
-          syncPlayState(true);
-        }}).catch(() => {{
-          syncPlayState(false);
-        }});
-      }} else {{
-        v.pause();
-        syncPlayState(false);
-      }}
-    }}
-
-    // Center button click directly plays or pauses (অফ/অন বাটন)
-    centerBtn.addEventListener('click', function(e) {{
-      e.stopPropagation();
-      togglePlay();
-    }});
-
+    const hud = document.getElementById('gesture-hud');
+    const hudIcon = document.getElementById('hud-icon');
+    const hudLabel = document.getElementById('hud-label');
+    const hudFill = document.getElementById('hud-fill');
     const tapLeft = document.getElementById('tap-left');
     const tapRight = document.getElementById('tap-right');
+
+    // =========================================================================
+    // SWIPE GESTURES:
+    // Left side vertical swipe -> Brightness (0% - 100%)
+    // Right side vertical swipe -> Volume (0% - 100%)
+    // Bottom 68px reserved for native timeline scrubber and controls
+    // =========================================================================
+    let brightnessPercent = 85;
+    let volumePercent = 100;
+    let touchState = null;
+    let hudTimer = null;
     let lastTapTime = 0, lastTapX = 0, tapTimer = null;
+
+    function showHud(type, val) {{
+      const clamped = Math.max(0, Math.min(100, Math.round(val)));
+      if (type === 'volume') {{
+        hudIcon.textContent = clamped === 0 ? '🔇' : clamped < 50 ? '🔉' : '🔊';
+        hudLabel.textContent = 'Sound ' + clamped + '%';
+      }} else {{
+        hudIcon.textContent = '☀️';
+        hudLabel.textContent = 'Light ' + clamped + '%';
+      }}
+      hudFill.style.width = clamped + '%';
+      hud.classList.add('visible');
+      if (hudTimer) clearTimeout(hudTimer);
+      hudTimer = setTimeout(() => {{
+        hud.classList.remove('visible');
+      }}, 700);
+    }}
+
+    function applyBrightness(val) {{
+      brightnessPercent = Math.max(0, Math.min(100, val));
+      const cssBrightness = (0.20 + (brightnessPercent / 100) * 1.05).toFixed(2);
+      v.style.filter = 'brightness(' + cssBrightness + ')';
+      showHud('brightness', brightnessPercent);
+    }}
+
+    function applyVolume(val) {{
+      volumePercent = Math.max(0, Math.min(100, val));
+      v.muted = volumePercent === 0;
+      v.volume = Math.max(0, Math.min(1, volumePercent / 100));
+      showHud('volume', volumePercent);
+    }}
 
     function showTapEffect(side) {{
       const el = side === 'left' ? tapLeft : tapRight;
@@ -1018,12 +1006,68 @@ async def watch_video(stream_id: str, q: str = ""):
       v.currentTime = nextTime;
     }}
 
-    // SMART SCREEN GESTURE:
-    // Single-Tap on screen: Shows the Pause/Play button (অফ/অন করার বাটন) or hides controls if already shown!
-    // Double-Tap Right: +10s
-    // Double-Tap Left: -10s
+    function togglePlay() {{
+      if (v.paused) {{
+        v.play().catch(() => {{}});
+      }} else {{
+        v.pause();
+      }}
+    }}
+
+    // TOUCH EVENT LISTENERS FOR BRIGHTNESS & SOUND
+    box.addEventListener('touchstart', function(e) {{
+      if (!e.touches || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const rect = box.getBoundingClientRect();
+      const relY = touch.clientY - rect.top;
+      const relX = touch.clientX - rect.left;
+
+      // Bottom 68px reserved for native <video controls>
+      if (relY > rect.height - 68) {{
+        touchState = null;
+        return;
+      }}
+
+      touchState = {{
+        startX: touch.clientX,
+        startY: touch.clientY,
+        isRightSide: relX > rect.width / 2,
+        startVolume: volumePercent,
+        startBrightness: brightnessPercent,
+        swiping: false,
+        boxHeight: Math.max(160, rect.height)
+      }};
+    }}, {{ passive: true, capture: true }});
+
+    box.addEventListener('touchmove', function(e) {{
+      if (!e.touches || e.touches.length !== 1 || !touchState) return;
+      const touch = e.touches[0];
+      const dy = touchState.startY - touch.clientY;
+      const dx = touch.clientX - touchState.startX;
+
+      if (!touchState.swiping) {{
+        if (Math.abs(dy) > 8 && Math.abs(dy) > Math.abs(dx)) {{
+          touchState.swiping = true;
+        }} else {{
+          return;
+        }}
+      }}
+
+      const deltaPercent = (dy / (touchState.boxHeight * 0.65)) * 100;
+      if (touchState.isRightSide) {{
+        applyVolume(touchState.startVolume + deltaPercent);
+      }} else {{
+        applyBrightness(touchState.startBrightness + deltaPercent);
+      }}
+    }}, {{ passive: true, capture: true }});
+
+    box.addEventListener('touchend', function() {{
+      touchState = null;
+    }}, {{ passive: true, capture: true }});
+
+    // DOUBLE TAP FOR SEEK (-10s / +10s) OR SINGLE TAP
     box.addEventListener('click', function(e) {{
-      if (e.target.closest('.quality-pill') || e.target.closest('#q-modal') || e.target.closest('#center-play-btn')) return;
+      if (e.target.closest('.quality-pill') || e.target.closest('#q-modal')) return;
 
       const rect = box.getBoundingClientRect();
       const clickX = e.clientX - rect.left;
@@ -1031,14 +1075,14 @@ async def watch_video(stream_id: str, q: str = ""):
       const width = rect.width;
       const height = rect.height;
 
-      // If user tapped on native control bar at bottom of video, don't trigger center tap
-      if (clickY > height - 48) return;
+      // Don't intercept clicks on bottom native controls
+      if (clickY > height - 68) return;
 
       const currentTime = Date.now();
       const diffTime = currentTime - lastTapTime;
 
-      // Double-tap detected (within 320ms and within the same half of screen)
-      if (diffTime < 320 && Math.abs(clickX - lastTapX) < width * 0.35) {{
+      // Double-tap detected (within 320ms on same side)
+      if (diffTime < 320 && Math.abs(clickX - lastTapX) < width * 0.38) {{
         if (tapTimer) {{
           clearTimeout(tapTimer);
           tapTimer = null;
@@ -1049,24 +1093,17 @@ async def watch_video(stream_id: str, q: str = ""):
         }} else if (clickX < width * 0.45) {{
           seekRelative(-10);
           showTapEffect('left');
-        }} else {{
-          toggleControls();
         }}
         lastTapTime = 0;
       }} else {{
-        // Single tap: Schedule toggleControls after 260ms if not followed by a second tap
         lastTapTime = currentTime;
         lastTapX = clickX;
         if (tapTimer) clearTimeout(tapTimer);
         tapTimer = setTimeout(() => {{
-          toggleControls();
           tapTimer = null;
-        }}, 260);
+        }}, 280);
       }}
     }});
-
-    v.addEventListener('play', () => {{ syncPlayState(true); }});
-    v.addEventListener('pause', () => {{ syncPlayState(false); }});
 
     function setQ(q) {{
       document.getElementById('ql').textContent = q;
@@ -1106,7 +1143,7 @@ async def watch_video(stream_id: str, q: str = ""):
 
 
 async def handle_telegram_stream(stream_id: str, request: Request, quality: str, is_download: bool):
-    # 1. Look up file metadata & telegramFileId from MongoDB (Supports all past ID formats)
+    # 1. Search in MongoDB for stored metadata
     clean_id = stream_id.replace("tg-", "")
     num_id = int(clean_id) if clean_id.isdigit() else -1
     doc = await videos_col.find_one({
@@ -1121,39 +1158,51 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
         ]
     })
 
-    media_target = None
+    # 2. Resolve genuine Telegram Message object with full MTProto file credentials
+    target_msg = None
+    if doc and doc.get("bin_msg_id") and BIN_CHANNEL:
+        try:
+            target_msg = await bot.get_messages(BIN_CHANNEL, int(doc["bin_msg_id"]))
+        except Exception as e:
+            logger.warning(f"Failed get_messages from BIN_CHANNEL: {e}")
+
+    if not target_msg and doc and doc.get("chat_id") and doc.get("msg_id"):
+        try:
+            target_msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
+        except Exception as e:
+            logger.warning(f"Failed get_messages from chat_id: {e}")
+
+    if not target_msg and num_id > 0 and BIN_CHANNEL:
+        try:
+            target_msg = await bot.get_messages(BIN_CHANNEL, num_id)
+        except Exception as e:
+            logger.warning(f"Failed direct BIN_CHANNEL fetch: {e}")
+
+    # Extract media & file size
+    media_obj = None
+    if target_msg:
+        media_obj = target_msg.video or target_msg.document or target_msg.animation or target_msg.audio
+
     file_size = 0
     file_name = f"SR_Video_{stream_id}_{quality}.mp4"
     mime_type = "video/mp4"
 
-    if doc and doc.get("telegramFileId"):
-        media_target = doc["telegramFileId"]
+    if media_obj:
+        file_size = getattr(media_obj, "file_size", 0) or 0
+        file_name = getattr(media_obj, "file_name", None) or file_name
+        mime_type = getattr(media_obj, "mime_type", "video/mp4") or "video/mp4"
+    elif doc:
         file_size = int(doc.get("sizeBytes") or 0)
         file_name = doc.get("fileName") or file_name
         mime_type = doc.get("mimeType") or "video/mp4"
 
-    # 2. Fallback to fetching message from chat_id or BIN_CHANNEL if not in MongoDB
-    if not media_target or file_size <= 0:
-        try:
-            if doc and doc.get("chat_id") and doc.get("msg_id"):
-                msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
-            else:
-                numeric_id = int(stream_id.replace("tg-", ""))
-                msg = await bot.get_messages(BIN_CHANNEL, numeric_id)
-            media = msg.video or msg.document or msg.animation
-            if not media:
-                raise HTTPException(status_code=404, detail="Media not found")
-            media_target = msg
-            file_size = getattr(media, "file_size", 0)
-            file_name = getattr(media, "file_name", file_name)
-            mime_type = getattr(media, "mime_type", "video/mp4") or "video/mp4"
-        except Exception as exc:
-            raise HTTPException(status_code=404, detail=f"Video #{stream_id} not found: {exc}")
+    if file_size <= 0:
+        raise HTTPException(status_code=404, detail="File size or media not found")
 
     if not mime_type.startswith("video/"):
         mime_type = "video/mp4"
 
-    # 3. Exact HTTP 206 Byte-Range Calculation (Fixes ERR_CONTENT_LENGTH_MISMATCH)
+    # 3. Exact HTTP 206 Byte-Range Calculation (0-byte disk usage on Render! Pure memory stream!)
     range_header = request.headers.get("Range", "")
     if range_header and range_header.startswith("bytes="):
         parts = range_header.replace("bytes=", "").split("-")
@@ -1168,7 +1217,7 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
         return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
 
     req_length = until_bytes - from_bytes + 1
-    chunk_size = 1024 * 1024  # 1 MB per Telegram MTProto chunk
+    chunk_size = 1024 * 1024  # 1 MB MTProto chunk
     first_part = from_bytes // chunk_size
     last_part = until_bytes // chunk_size
     part_count = last_part - first_part + 1
@@ -1188,11 +1237,12 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
     if request.method == "HEAD":
         return Response(status_code=206 if range_header else 200, headers=headers)
 
+    # ZERO DISK USAGE GENERATOR: Stream directly from Telegram MTProto chunk into HTTP stream!
     async def media_generator():
-        nonlocal media_target
         current_part = 1
+        stream_target = target_msg or (doc.get("telegramFileId") if doc else stream_id)
         try:
-            async for chunk in bot.stream_media(media_target, offset=first_part, limit=part_count):
+            async for chunk in bot.stream_media(stream_target, limit=part_count, offset=first_part):
                 if part_count == 1:
                     yield chunk[first_part_cut:last_part_cut]
                 elif current_part == 1:
@@ -1202,29 +1252,8 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
                 else:
                     yield chunk
                 current_part += 1
-        except Exception:
-            # Auto-refresh media_target from BIN_CHANNEL or chat_id if file_reference expired after 24h
-            if doc and doc.get("bin_msg_id"):
-                fresh_msg = await bot.get_messages(BIN_CHANNEL, int(doc["bin_msg_id"]))
-            elif doc and doc.get("chat_id") and doc.get("msg_id"):
-                fresh_msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
-            else:
-                numeric_id = int(stream_id.replace("tg-", ""))
-                fresh_msg = await bot.get_messages(BIN_CHANNEL, numeric_id)
-            fresh_media = fresh_msg.video or fresh_msg.document or fresh_msg.animation
-            if fresh_media and getattr(fresh_media, "file_id", None):
-                await videos_col.update_one({"id": stream_id}, {"$set": {"telegramFileId": fresh_media.file_id}})
-            current_part = 1
-            async for chunk in bot.stream_media(fresh_msg, offset=first_part, limit=part_count):
-                if part_count == 1:
-                    yield chunk[first_part_cut:last_part_cut]
-                elif current_part == 1:
-                    yield chunk[first_part_cut:]
-                elif current_part == part_count:
-                    yield chunk[:last_part_cut]
-                else:
-                    yield chunk
-                current_part += 1
+        except Exception as e:
+            logger.error(f"Telegram streaming exception on part {current_part}: {e}")
 
     return StreamingResponse(
         media_generator(),
