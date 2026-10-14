@@ -13,8 +13,7 @@ services:
         value: 8080
       - key: DOMAIN
         value: https://ss-anime-file-to-link.onrender.com
-      - key: MONGO_URI
-        value: "url"
+      - key: ""
       - key: API_ID
         value: "29608422"
       - key: API_HASH
