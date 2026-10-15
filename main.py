@@ -70,6 +70,7 @@ videos_col = db["videos"]
 users_col = db["users"]
 admins_col = db["admins"]
 settings_col = db["settings"]
+config_col = db["config"]
 locks_col = db["message_locks"]
 PROCESSED_MSG_KEYS = set()
 
@@ -982,7 +983,7 @@ async def watch_video(stream_id: str, q: str = ""):
           <button type="button" class="q-chip" id="chip-1080p" onclick="setQ('1080p')">▶️ 1080p FHD</button>
         </div>
 
-        <div class="meta-section-title" style="margin-top:6px;">⬇️ সরাসরি ডাউনলোড করুন:</div>
+        <div class="meta-section-title" style="margin-top:6px;">⬇️ সরাসরি ডাউনলোড বা প্লেয়ারে দেখুন:</div>
         <a class="main-dl-btn" href="{dl_url}?quality={initial_q}" id="main-dl-link">
           ⬇️ Download Video (<span id="main-dl-q">{initial_q}</span>)
         </a>
@@ -990,6 +991,12 @@ async def watch_video(stream_id: str, q: str = ""):
           <a class="dl-chip" href="{dl_url}?quality=480p">⬇️ 480p</a>
           <a class="dl-chip" href="{dl_url}?quality=720p">⬇️ 720p</a>
           <a class="dl-chip" href="{dl_url}?quality=1080p">⬇️ 1080p</a>
+        </div>
+
+        <div class="meta-section-title" style="margin-top:8px;">📱 এক্সটার্নাল অ্যাপে দেখুন (100% গ্যারান্টি চলবে):</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+          <a class="dl-chip" style="background:#1e1b4b; border-color:#6366f1; color:#a5b4fc; font-size:12px; padding:10px;" href="intent:{DOMAIN}{stream_url}?quality={initial_q}#Intent;package=com.mxtech.videoplayer.ad;type=video/*;end">📱 MX Player</a>
+          <a class="dl-chip" style="background:#431407; border-color:#f97316; color:#fdba74; font-size:12px; padding:10px;" href="vlc://{DOMAIN.replace('https://','').replace('http://','')}{stream_url}?quality={initial_q}">🧡 VLC Player</a>
         </div>
       </div>
     </div>
@@ -1260,21 +1267,44 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
 
     # 2. Resolve genuine Telegram Message object with full MTProto file credentials
     target_msg = None
-    if doc and doc.get("bin_msg_id") and BIN_CHANNEL:
+    target_bin = int(doc.get("bin_channel") or BIN_CHANNEL or 0) if doc else BIN_CHANNEL
+    bin_msg_id = int(doc.get("bin_msg_id") or 0) if doc else 0
+
+    # Ensure BIN_CHANNEL peer is resolved in memory before message query
+    if target_bin:
         try:
-            target_msg = await bot.get_messages(BIN_CHANNEL, int(doc["bin_msg_id"]))
+            await bot.get_chat(target_bin)
+        except Exception:
+            pass
+
+    if target_bin and bin_msg_id > 0:
+        try:
+            target_msg = await bot.get_messages(target_bin, bin_msg_id)
         except Exception as e:
             logger.warning(f"Failed get_messages from BIN_CHANNEL: {e}")
 
+    # Fallback 1: If message not found or file reference expired, re-cache into BIN_CHANNEL
+    if not target_msg and doc and doc.get("telegramFileId") and target_bin:
+        try:
+            fresh_msg = await bot.send_cached_media(chat_id=target_bin, file_id=doc["telegramFileId"])
+            if fresh_msg:
+                target_msg = fresh_msg
+                await videos_col.update_one({"id": doc["id"]}, {"$set": {"bin_msg_id": fresh_msg.id, "bin_channel": target_bin}})
+                logger.info(f"Refreshed Telegram file_reference for {doc.get('id')}")
+        except Exception as ref_err:
+            logger.warning(f"send_cached_media fallback: {ref_err}")
+
+    # Fallback 2: Original chat_id and msg_id
     if not target_msg and doc and doc.get("chat_id") and doc.get("msg_id"):
         try:
             target_msg = await bot.get_messages(int(doc["chat_id"]), int(doc["msg_id"]))
         except Exception as e:
             logger.warning(f"Failed get_messages from chat_id: {e}")
 
-    if not target_msg and num_id > 0 and BIN_CHANNEL:
+    # Fallback 3: Direct BIN_CHANNEL fetch if stream_id is numeric
+    if not target_msg and num_id > 0 and target_bin:
         try:
-            target_msg = await bot.get_messages(BIN_CHANNEL, num_id)
+            target_msg = await bot.get_messages(target_bin, num_id)
         except Exception as e:
             logger.warning(f"Failed direct BIN_CHANNEL fetch: {e}")
 
@@ -1330,6 +1360,10 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
         "Accept-Ranges": "bytes",
         "Content-Length": str(req_length),
         "Content-Disposition": f'{disposition}; filename="{file_name}"',
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Range, Content-Type, Authorization, Accept",
+        "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges, Content-Type, Content-Disposition",
     }
     if range_header:
         headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
@@ -1340,7 +1374,10 @@ async def handle_telegram_stream(stream_id: str, request: Request, quality: str,
     # ZERO DISK USAGE GENERATOR: Stream directly from Telegram MTProto chunk into HTTP stream!
     async def media_generator():
         current_part = 1
-        stream_target = target_msg or (doc.get("telegramFileId") if doc else stream_id)
+        stream_target = media_obj or target_msg
+        if not stream_target:
+            logger.error("No valid Telegram Message object found for streaming!")
+            return
         try:
             async for chunk in bot.stream_media(stream_target, limit=part_count, offset=first_part):
                 if part_count == 1:
@@ -1379,7 +1416,22 @@ async def download_endpoint(stream_id: str, request: Request, quality: str = "10
 # UNIFIED ASYNC ENTRYPOINT
 # ==============================================================================
 async def start_services():
+    global BIN_CHANNEL, DOMAIN
     logger.info(f"Starting SR-VIDEO-QUALITY on domain: {DOMAIN} (Port {PORT})")
+
+    # Auto-synchronize missing settings from MongoDB Atlas
+    try:
+        cfg = await config_col.find_one({"_id": "global_config"})
+        if cfg:
+            if (not BIN_CHANNEL or BIN_CHANNEL == -1001234567890) and cfg.get("binChannel"):
+                BIN_CHANNEL = int(cfg["binChannel"])
+                logger.info(f"Loaded BIN_CHANNEL from MongoDB: {BIN_CHANNEL}")
+            if cfg.get("activeDomain") and not os.environ.get("STREAM_DOMAIN") and not os.environ.get("PUBLIC_URL"):
+                DOMAIN = cfg["activeDomain"].rstrip("/")
+                logger.info(f"Loaded DOMAIN from MongoDB: {DOMAIN}")
+    except Exception as sync_err:
+        logger.warning(f"MongoDB config sync warning: {sync_err}")
+
     config = uvicorn.Config(web_app, host="0.0.0.0", port=PORT, log_level="info")
     server = uvicorn.Server(config)
 
@@ -1391,6 +1443,15 @@ async def start_services():
             await bot.start()
             me = await bot.get_me()
             logger.info(f"Telegram Bot @{me.username} connected with MongoDB persistence!")
+
+            # Pre-cache channel peer in MTProto so get_messages NEVER fails
+            if BIN_CHANNEL:
+                try:
+                    await bot.get_chat(BIN_CHANNEL)
+                    logger.info(f"✅ BIN_CHANNEL peer successfully cached: {BIN_CHANNEL}")
+                except Exception as ce:
+                    logger.warning(f"⚠️ Could not cache BIN_CHANNEL peer: {ce}")
+
             await idle()
             await bot.stop()
         except Exception as bot_err:
