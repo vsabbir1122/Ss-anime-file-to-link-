@@ -48,9 +48,12 @@ ADMINS = [int(x) for x in re.findall(r"\d+", ADMINS_RAW)]
 MIN_FILE_SIZE_MB = float(os.environ.get("MIN_FILE_SIZE_MB", "10"))
 
 RAW_DOMAIN = (
-    os.environ.get("RENDER_EXTERNAL_URL")
+    os.environ.get("STREAM_DOMAIN")
+    or os.environ.get("PUBLIC_URL")
+    or os.environ.get("CF_DOMAIN")
+    or os.environ.get("RENDER_EXTERNAL_URL")
     or os.environ.get("DOMAIN")
-    or "https://ss-anime-file-to-link.onrender.com"
+    or "https://ssanime.vsabbir1122.workers.dev"
 ).strip().rstrip("/")
 
 if not RAW_DOMAIN.startswith(("http://", "https://")):
@@ -69,6 +72,31 @@ admins_col = db["admins"]
 settings_col = db["settings"]
 locks_col = db["message_locks"]
 PROCESSED_MSG_KEYS = set()
+
+async def get_stream_domain() -> str:
+    try:
+        doc = await settings_col.find_one({"key": "stream_domain"})
+        if doc and "val" in doc and doc["val"]:
+            val = str(doc["val"]).strip().rstrip("/")
+            if not val.startswith(("http://", "https://")):
+                val = f"https://{val}"
+            return val
+    except Exception:
+        pass
+
+    custom = (
+        os.environ.get("STREAM_DOMAIN")
+        or os.environ.get("PUBLIC_URL")
+        or os.environ.get("CF_DOMAIN")
+        or os.environ.get("CLOUDFLARE_URL")
+    )
+    if custom and custom.strip():
+        val = custom.strip().rstrip("/")
+        if not val.startswith(("http://", "https://")):
+            val = f"https://{val}"
+        return val
+
+    return DOMAIN
 
 async def get_min_file_size_mb() -> float:
     try:
@@ -158,14 +186,17 @@ async def start_handler(client: Client, message: Message):
         return
 
     min_size_val = await get_min_file_size_mb()
+    active_domain = await get_stream_domain()
     await message.reply_text(
         "🎬 **SR-VIDEO-QUALITY Bot is Online!**\n\n"
         "Send or forward any Video / MKV / MP4 file to me and I will generate "
         "instant **1080p, 720p, 480p, and 360p** streaming & fast download links.\n\n"
-        f"🌐 **Active Domain:** `{DOMAIN}`\n"
+        f"🌐 **Active Streaming Domain:** `{active_domain}`\n"
         f"👑 **Admin Status:** Authorized (`{user_id}`)\n"
-        f"📦 **সর্বনিম্ন ফাইল সাইজ:** `{min_size_val} MB` (১০ এমবির কম ফাইল গ্রহণযোগ্য নয়)\n\n"
+        f"📦 **সর্বনিম্ন ফাইল সাইজ:** `{min_size_val} MB`\n\n"
         "🛠️ **অ্যাডমিন কমান্ডসমূহ (Admin Management):**\n"
+        "• `/setdomain <URL>` ক্লাউডফ্লেয়ার বা কাস্টম ডোমেইন সেট করুন\n"
+        "• `/domain` বর্তমান স্ট্রিমিং ডোমেইন দেখুন\n"
         "• `/addadmin <user_id>` নতুন কাউকে অ্যাডমিন বানান\n"
         "• `/deladmin <user_id>` কাউকে অ্যাডমিন থেকে বাদ দিন\n"
         "• `/admins` সকল অ্যাডমিনের তালিকা দেখুন\n"
@@ -353,6 +384,53 @@ async def get_min_size_handler(client: Client, message: Message):
     )
 
 
+@bot.on_message(filters.command(["setdomain", "domain", "setcf", "cfdomain"]) & filters.private)
+async def set_domain_handler(client: Client, message: Message):
+    if not message.from_user:
+        return
+    if not await check_is_admin(message.from_user.id):
+        await message.reply_text("⛔ শুধুমাত্র অনুমোদিত অ্যাডমিনরা ডোমেইন পরিবর্তন করতে পারেন।")
+        return
+
+    parts = message.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        cur_dom = await get_stream_domain()
+        await message.reply_text(
+            f"🌐 **বটের বর্তমান স্ট্রিমিং ডোমেইন:**\n`{cur_dom}`\n\n"
+            f"💡 **ডোমেইন পরিবর্তন করতে লিখুন:**\n"
+            f"`/setdomain https://ssanime.vsabbir1122.workers.dev`\n\n"
+            f"🔄 **রেন্ডারের মূল ডোমেইনে ফিরতে:**\n"
+            f"`/setdomain default`"
+        )
+        return
+
+    new_val = parts[1].strip()
+    if new_val.lower() == "default":
+        await settings_col.delete_one({"key": "stream_domain"})
+        await message.reply_text(f"✅ ডোমেইন ডিফল্ট ({DOMAIN})-এ রিসেট করা হয়েছে।")
+        return
+
+    if not new_val.startswith(("http://", "https://")):
+        new_val = f"https://{new_val}"
+    new_val = new_val.rstrip("/")
+
+    await settings_col.update_one(
+        {"key": "stream_domain"},
+        {"$set": {
+            "key": "stream_domain",
+            "val": new_val,
+            "updated_by": message.from_user.id,
+            "updated_at": datetime.utcnow().isoformat()
+        }},
+        upsert=True
+    )
+    await message.reply_text(
+        f"🎉 **স্ট্রিমিং ডোমেইন সফলভাবে সেট করা হয়েছে!**\n\n"
+        f"🌐 **নতুন ডোমেইন:** `{new_val}`\n\n"
+        f"এখন থেকে বটে কোনো ফাইল পাঠালে সরাসরি এই ডোমেইনের ওয়াচ ও ডাউনলোড লিংক তৈরি হবে!"
+    )
+
+
 @bot.on_message((filters.private | filters.group) & (filters.video | filters.document | filters.animation))
 async def media_handler(client: Client, message: Message):
     media = message.video or message.document or message.animation
@@ -448,8 +526,9 @@ async def media_handler(client: Client, message: Message):
         }
         await videos_col.update_one({"id": stream_id}, {"$set": doc}, upsert=True)
 
-        watch_url = f"{DOMAIN}/player/{stream_id}"
-        dl_url = f"{DOMAIN}/dl/{stream_id}"
+        active_domain = await get_stream_domain()
+        watch_url = f"{active_domain}/player/{stream_id}"
+        dl_url = f"{active_domain}/dl/{stream_id}"
 
         buttons = InlineKeyboardMarkup([
             [
@@ -514,9 +593,10 @@ async def media_handler(client: Client, message: Message):
 @bot.on_callback_query()
 async def quality_callback_handler(client: Client, callback_query):
     data = callback_query.data or ""
+    active_domain = await get_stream_domain()
     if data.startswith("q_watch:"):
         stream_id = data.replace("q_watch:", "")
-        watch_url = f"{DOMAIN}/player/{stream_id}"
+        watch_url = f"{active_domain}/player/{stream_id}"
         await callback_query.answer("🎬 ভিডিও দেখার জন্য কোয়ালিটি সিলেক্ট করুন (480p / 720p / 1080p)")
         await callback_query.message.edit_reply_markup(
             InlineKeyboardMarkup([
@@ -528,7 +608,7 @@ async def quality_callback_handler(client: Client, callback_query):
         )
     elif data.startswith("q_dl:"):
         stream_id = data.replace("q_dl:", "")
-        dl_url = f"{DOMAIN}/dl/{stream_id}"
+        dl_url = f"{active_domain}/dl/{stream_id}"
         await callback_query.answer("⬇️ ডাউনলোড করার জন্য কোয়ালিটি সিলেক্ট করুন (480p / 720p / 1080p)")
         await callback_query.message.edit_reply_markup(
             InlineKeyboardMarkup([
@@ -540,8 +620,8 @@ async def quality_callback_handler(client: Client, callback_query):
         )
     elif data.startswith("q_main:"):
         stream_id = data.replace("q_main:", "")
-        watch_url = f"{DOMAIN}/player/{stream_id}"
-        dl_url = f"{DOMAIN}/dl/{stream_id}"
+        watch_url = f"{active_domain}/player/{stream_id}"
+        dl_url = f"{active_domain}/dl/{stream_id}"
         await callback_query.answer()
         await callback_query.message.edit_reply_markup(
             InlineKeyboardMarkup([
@@ -1129,6 +1209,26 @@ async def watch_video(stream_id: str, q: str = ""):
       v.currentTime = savedTime;
       v.play().catch(() => {{}});
     }}
+
+    // Auto Landscape on Fullscreen
+    function handleFsOrientation() {{
+      const isFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      if (isFs) {{
+        try {{
+          if (screen.orientation && screen.orientation.lock) {{
+            screen.orientation.lock('landscape').catch(() => {{}});
+          }}
+        }} catch(e) {{}}
+      }} else {{
+        try {{
+          if (screen.orientation && screen.orientation.unlock) {{
+            screen.orientation.unlock();
+          }}
+        }} catch(e) {{}}
+      }}
+    }}
+    document.addEventListener('fullscreenchange', handleFsOrientation);
+    document.addEventListener('webkitfullscreenchange', handleFsOrientation);
 
     // KEYBOARD SHORTCUTS
     window.addEventListener('keydown', function(e) {{
