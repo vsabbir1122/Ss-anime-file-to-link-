@@ -13,7 +13,8 @@ services:
         value: 8080
       - key: DOMAIN
         value: https://ssanime.vsabbir1122.workers.dev
-      - key: ""
+      - key: MONGO_URI
+        value: "mongodb+srv://sabbirvai1122:SABBIRVAI1122@cluster0.t1bsiei.mongodb.net/?appName=Cluster0"
       - key: API_ID
         value: "29608422"
       - key: API_HASH
